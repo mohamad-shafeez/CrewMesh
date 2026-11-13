@@ -14,11 +14,13 @@ env:
   APP_ORIGIN: http://localhost:5173
   DATABASE_URL: postgresql://crewmesh:crewmesh_ci_test_password@localhost:5432/crewmesh_test
   TEST_DATABASE_URL: postgresql://crewmesh:crewmesh_ci_test_password@localhost:5432/crewmesh_test
+  DATABASE_SSL: disable
   DB_POOL_MAX: 25
   SESSION_COOKIE_NAME: crewmesh_session
   SESSION_TTL_HOURS: 168
   CSRF_SECRET: ci_test_csrf_secret_with_at_least_32_characters_of_random_entropy_2026
   TRUST_PROXY: 'false'
+  SERVE_WEB_DIST: 'false'
   LOG_LEVEL: warn
   HACKATHON_SLUG: hack4hack-crew-2026
   HACKATHON_NAME: Hack4Hack Crew Hiring Challenge 2026
@@ -56,13 +58,15 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies (npm ci when lockfile exists, else generate and verify lockfile)
+      - name: Verify root package-lock.json exists
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install --no-audit --no-fund
+          if [ ! -f package-lock.json ]; then
+            echo "::error file=package-lock.json::Root package-lock.json is missing. Commit a real npm workspace lockfile so dependencies install deterministically via npm ci."
+            exit 1
           fi
+
+      - name: Install dependencies reproducibly via npm ci
+        run: npm ci
 
       - name: Apply PostgreSQL migrations (001 through 007)
         run: npm run db:migrate
@@ -76,23 +80,26 @@ jobs:
       - name: Seed Hack4Hack 2026 event configuration
         run: npm run db:seed
 
-      - name: Run ESLint
+      - name: Run ESLint across all workspaces and scripts
         run: npm run lint
 
-      - name: Run TypeScript typechecking across all workspaces (clean checkout safe)
+      - name: Run TypeScript typechecking across all workspaces
         run: npm run typecheck
 
       - name: Build shared, API, and Web production bundles
         run: npm run build
 
-      - name: Run isolated unit and invariant tests (Batches 1–8)
+      - name: Run isolated unit and invariant tests (Batches 1–9)
         run: npm run test:unit:sandbox
 
-      - name: Run PostgreSQL API, SSE, Suggestions, Scale Safety & Batch 7/8 Hardening integration suites
-        run: npm run test:integration --workspace=@crewmesh/api
+      - name: Run PostgreSQL API, SSE, Suggestions, Scale Safety & Hardening integration suites
+        run: npm run test:integration
 
       - name: Run 50-way last-seat concurrency & invite use-limit race proofs
-        run: npm run test:race --workspace=@crewmesh/api
+        run: npm run test:race
+
+      - name: Run Batch 7/8/9 security and concurrency hardening suite
+        run: npm run test:hardening
 
       - name: Run frontend unit tests
         run: npm run test --workspace=@crewmesh/web
@@ -116,7 +123,7 @@ jobs:
           kill $API_PID $WEB_PID || true
 
   scale-and-k6-benchmark:
-    name: Batch 06–08 — 10k Participants, 2k Teams Scale Seed & 100-VU k6 Board Benchmark (p95 < 200ms)
+    name: Batch 06–09 — 10k Participants, 2k Teams Scale Seed & 100-VU k6 Board Benchmark (p95 < 200ms)
     runs-on: ubuntu-latest
     needs: verify-and-test
     timeout-minutes: 20
@@ -150,13 +157,15 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies
+      - name: Verify root package-lock.json exists
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install --no-audit --no-fund
+          if [ ! -f package-lock.json ]; then
+            echo "::error file=package-lock.json::Root package-lock.json is missing. Commit a real npm workspace lockfile so dependencies install deterministically via npm ci."
+            exit 1
           fi
+
+      - name: Install dependencies reproducibly via npm ci
+        run: npm ci
 
       - name: Apply PostgreSQL migrations (001 through 007) on isolated crewmesh_loadtest database
         run: npm run db:migrate
@@ -168,7 +177,7 @@ jobs:
         run: npm run db:seed:scale
 
       - name: Run PostgreSQL scale seed integration and idempotency verification against crewmesh_loadtest
-        run: npm run test:scale --workspace=@crewmesh/api
+        run: npm run test:scale
 
       - name: Build production shared and API bundles
         run: npm run build --workspace=@crewmesh/shared && npm run build --workspace=@crewmesh/api
@@ -188,16 +197,16 @@ jobs:
             fi
             sleep 1
           done
-          K6_REPORT_DIR=reports/load-test k6 run apps/api/load/board.k6.js
+          K6_REPORT_DIR=reports/load-test npm run bench:board:k6
           cp reports/load-test/k6-summary.json reports/load-test/k6-summary-run1.json
           cp reports/load-test/k6-summary.txt reports/load-test/k6-summary-run1.txt
-          K6_REPORT_DIR=reports/load-test k6 run apps/api/load/board.k6.js
+          K6_REPORT_DIR=reports/load-test npm run bench:board:k6
           kill $API_PID || true
 
       - name: Upload k6 benchmark and PostgreSQL EXPLAIN artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crewmesh-batch8-load-test-reports
+          name: crewmesh-batch9-load-test-reports
           path: reports/load-test/
           retention-days: 30

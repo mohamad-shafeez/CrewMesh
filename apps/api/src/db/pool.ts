@@ -14,6 +14,25 @@ export interface DatabaseReadinessResult {
 }
 
 /**
+ * Resolves PostgreSQL TLS/SSL connection options from `DATABASE_SSL` or `sslmode=` URL parameters.
+ * - `verify-full` (or `sslmode=verify-full`): `{ rejectUnauthorized: true }`
+ * - `require` (or `sslmode=require`): `{ rejectUnauthorized: false }`
+ * - `disable` (default for local/CI PostgreSQL): `undefined`
+ */
+export function resolvePgSslOptions(
+  sslMode: 'disable' | 'require' | 'verify-full',
+  connectionString: string,
+): { rejectUnauthorized: boolean } | undefined {
+  if (sslMode === 'verify-full' || connectionString.includes('sslmode=verify-full')) {
+    return { rejectUnauthorized: true };
+  }
+  if (sslMode === 'require' || connectionString.includes('sslmode=require')) {
+    return { rejectUnauthorized: false };
+  }
+  return undefined;
+}
+
+/**
  * Creates or returns the shared PostgreSQL connection pool.
  */
 export function getDbPool(customConnectionString?: string): Pool {
@@ -24,9 +43,11 @@ export function getDbPool(customConnectionString?: string): Pool {
       (env.NODE_ENV === 'test' && env.TEST_DATABASE_URL
         ? env.TEST_DATABASE_URL
         : env.DATABASE_URL);
+    const ssl = resolvePgSslOptions(env.DATABASE_SSL, connectionString);
 
     activePool = new PgPool({
       connectionString,
+      ...(ssl ? { ssl } : {}),
       max: env.DB_POOL_MAX,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 5_000,

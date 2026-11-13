@@ -28,6 +28,7 @@ const envSchema = z
           val === undefined || val.startsWith('postgres://') || val.startsWith('postgresql://'),
         'TEST_DATABASE_URL must start with postgres:// or postgresql:// when set',
       ),
+    DATABASE_SSL: z.enum(['disable', 'require', 'verify-full']).default('disable'),
     DB_POOL_MAX: z.coerce.number().int().min(2).max(200).default(25),
     SESSION_COOKIE_NAME: z
       .string()
@@ -38,6 +39,10 @@ const envSchema = z
     SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(720).default(168),
     CSRF_SECRET: z.string().min(32, 'CSRF_SECRET must be at least 32 characters long'),
     TRUST_PROXY: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((val) => val === 'true'),
+    SERVE_WEB_DIST: z
       .enum(['true', 'false'])
       .default('false')
       .transform((val) => val === 'true'),

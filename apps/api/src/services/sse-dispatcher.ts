@@ -9,7 +9,7 @@ import type {
   TeamStreamSseEventPayload,
 } from '@crewmesh/shared';
 import { getEnv } from '../config/env.js';
-import { getDbPool } from '../db/pool.js';
+import { getDbPool, resolvePgSslOptions } from '../db/pool.js';
 import { AppError } from '../plugins/error-handler.js';
 import { sanitizeEventMetadata } from './audit-outbox-service.js';
 
@@ -377,8 +377,10 @@ export class OutboxSseDispatcher {
         ? env.TEST_DATABASE_URL
         : env.DATABASE_URL;
 
+    const ssl = resolvePgSslOptions(env.DATABASE_SSL, connectionString);
     const client = new PgClient({
       connectionString,
+      ...(ssl ? { ssl } : {}),
       application_name: 'crewmesh_sse_listener',
     });
 

@@ -15,15 +15,21 @@ interface HackathonRow {
 }
 
 export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
+  const livenessHandler = async () => ({
+    status: 'ok',
+    service: 'crewmesh-api',
+    timestamp: new Date().toISOString(),
+  });
+
   /**
-   * GET /health — Process liveness check
+   * GET /health & GET /healthz — Process liveness checks
    */
   app.get('/health', async (_request, reply) => {
-    return reply.status(200).send({
-      status: 'ok',
-      service: 'crewmesh-api',
-      timestamp: new Date().toISOString(),
-    });
+    return reply.status(200).send(await livenessHandler());
+  });
+
+  app.get('/healthz', async (_request, reply) => {
+    return reply.status(200).send(await livenessHandler());
   });
 
   /**

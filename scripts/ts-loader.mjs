@@ -1,13 +1,17 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const localRequire = createRequire(import.meta.url);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRootPackageJson = path.resolve(__dirname, '../package.json');
+const projectRequire = createRequire(repoRootPackageJson);
 
-function resolveTranspiler() {
-  // 1. Prefer project-local TypeScript compiler (`typescript` in workspace devDependencies)
+function resolveDeclaredTranspiler() {
+  // 1. Prefer the declared TypeScript compiler (`typescript` in workspace devDependencies)
   try {
-    const ts = localRequire('typescript');
+    const ts = projectRequire('typescript');
     return {
       kind: 'typescript',
       transpile(source, filename, isTsx, cjs = true) {
@@ -22,19 +26,19 @@ function resolveTranspiler() {
         });
         return out.outputText;
       },
-      baseRequire: localRequire,
+      baseRequire: projectRequire,
     };
   } catch {
-    // Continue to project-local @babel/core
+    // Continue to declared @babel/core
   }
 
-  // 2. Next prefer project-local @babel/core (`@babel/core` in workspace devDependencies)
+  // 2. Otherwise use the declared @babel/core + @babel/preset-typescript packages from root devDependencies
   try {
-    const babel = localRequire('@babel/core');
-    const presetTs = localRequire.resolve('@babel/preset-typescript');
-    const pluginCjs = localRequire.resolve('@babel/plugin-transform-modules-commonjs');
+    const babel = projectRequire('@babel/core');
+    const presetTs = projectRequire.resolve('@babel/preset-typescript');
+    const pluginCjs = projectRequire.resolve('@babel/plugin-transform-modules-commonjs');
     return {
-      kind: 'babel-local',
+      kind: 'babel',
       transpile(source, filename, isTsx, cjs = true) {
         const result = babel.transformSync(source, {
           filename,
@@ -45,41 +49,16 @@ function resolveTranspiler() {
         });
         return result && typeof result.code === 'string' ? result.code : '';
       },
-      baseRequire: localRequire,
+      baseRequire: projectRequire,
     };
   } catch {
-    // Continue to offline sandbox system fallback if available
+    throw new Error(
+      'Missing declared TypeScript transpiler dependencies ("typescript" or "@babel/core"). Run "npm ci" from the repository root before executing tests.',
+    );
   }
-
-  // 3. Fallback for offline sandbox container when node_modules is not installed
-  const sysIndex = '/usr/share/nodejs/index.js';
-  if (fs.existsSync(sysIndex)) {
-    const sysRequire = createRequire(sysIndex);
-    const babel = sysRequire('@babel/core');
-    const presetTs = sysRequire.resolve('@babel/preset-typescript');
-    const pluginCjs = sysRequire.resolve('@babel/plugin-transform-modules-commonjs');
-    return {
-      kind: 'babel-system-fallback',
-      transpile(source, filename, isTsx, cjs = true) {
-        const result = babel.transformSync(source, {
-          filename,
-          presets: [[presetTs, { isTSX: isTsx, allExtensions: true }]],
-          plugins: cjs ? [pluginCjs] : [],
-          configFile: false,
-          babelrc: false,
-        });
-        return result && typeof result.code === 'string' ? result.code : '';
-      },
-      baseRequire: sysRequire,
-    };
-  }
-
-  throw new Error(
-    'Unable to resolve project-local TypeScript or @babel/core transpiler. Run `npm ci` first.',
-  );
 }
 
-const activeTranspiler = resolveTranspiler();
+const activeTranspiler = resolveDeclaredTranspiler();
 
 export function getActiveTranspilerKind() {
   return activeTranspiler.kind;

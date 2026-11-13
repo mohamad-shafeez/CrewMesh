@@ -69,15 +69,12 @@ export async function buildApp(): Promise<FastifyInstance> {
   const webDistDir = path.resolve(__dirname, '../../../web/dist');
   const webIndexHtml = path.join(webDistDir, 'index.html');
   const shouldServeStaticWeb =
-    (process.env.SERVE_WEB_DIST === 'true' || env.NODE_ENV === 'production') &&
+    (env.SERVE_WEB_DIST || process.env.SERVE_WEB_DIST === 'true' || env.NODE_ENV === 'production') &&
     fs.existsSync(webIndexHtml);
 
   if (shouldServeStaticWeb) {
     app.setNotFoundHandler(async (request, reply) => {
-      if (
-        request.method !== 'GET' &&
-        request.method !== 'HEAD'
-      ) {
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
         return reply.status(404).send({
           error: {
             code: 'NOT_FOUND',

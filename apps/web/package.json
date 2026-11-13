@@ -1,12 +1,14 @@
 {
   "name": "@crewmesh/web",
-  "version": "0.4.0",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "npm --prefix ../../packages/shared run build",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview --port 5173",
+    "pretypecheck": "npm --prefix ../../packages/shared run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test"

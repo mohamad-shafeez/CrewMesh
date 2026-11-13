@@ -12,6 +12,10 @@ const sharedProxy = {
     target: apiProxyTarget,
     changeOrigin: false,
   },
+  '/healthz': {
+    target: apiProxyTarget,
+    changeOrigin: false,
+  },
   '/ready': {
     target: apiProxyTarget,
     changeOrigin: false,
