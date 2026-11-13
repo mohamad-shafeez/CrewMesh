@@ -1,0 +1,38 @@
+{
+  "name": "@crewmesh/api",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run test/phase1.integration.test.ts test/batch2.integration.test.ts test/batch3.sse.integration.test.ts test/batch5.suggestions.integration.test.ts",
+    "test:race": "vitest run test/batch2.race.test.ts",
+    "test:sse": "vitest run test/batch3.sse.integration.test.ts",
+    "test:suggestions": "vitest run test/batch5.suggestions.integration.test.ts",
+    "test:unit": "node --test test/phase1.unit.test.mjs test/batch2.unit.test.mjs test/batch3.unit.test.mjs test/batch4.unit.test.mjs test/batch5.unit.test.mjs",
+    "db:migrate": "tsx src/db/migrate.ts up",
+    "db:migrate:down": "tsx src/db/migrate.ts down",
+    "db:migrate:status": "tsx src/db/migrate.ts status",
+    "db:seed": "tsx src/db/seed.ts"
+  },
+  "dependencies": {
+    "@crewmesh/shared": "0.1.0",
+    "@fastify/cookie": "^9.4.0",
+    "argon2": "^0.40.3",
+    "fastify": "^4.28.1",
+    "pg": "^8.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

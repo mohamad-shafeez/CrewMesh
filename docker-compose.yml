@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: crewmesh-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-crewmesh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crewmesh_local_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-crewmesh_dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - crewmesh_pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/01-init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-crewmesh} -d $${POSTGRES_DB:-crewmesh_dev}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  crewmesh_pgdata:
+    name: crewmesh_pgdata

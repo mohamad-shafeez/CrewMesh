@@ -1,0 +1,94 @@
+/**
+ * CrewMesh Design System Tokens (Batch 04)
+ * Palette derived from Colorion 2Colors pairings:
+ * - #07553B (Deep Forest Emerald) + #CED46A (Warm Citrus Moss)
+ * - #02343F (Deep Botanical Teal) + #F0EDCC (Warm Parchment Cream)
+ * - #2D2926 (Warm Espresso Charcoal) + #ED6F63 (Terracotta Coral)
+ */
+
+:root {
+  /* Backgrounds & Surfaces (Warm Light Aesthetic — No Dark-Blue/Navy) */
+  --bg-page: #faf8f4;
+  --bg-surface: #ffffff;
+  --bg-subtle: #f3efe6;
+  --bg-elevated: #fcfbf9;
+  --bg-accent-soft: #eef5f1;
+  --bg-highlight-warm: #f0edcc;
+
+  /* Typography Colours (WCAG 2.2 AA Verified Contrast) */
+  --text-primary: #1e1c1a;
+  --text-secondary: #534e49;
+  --text-muted: #756f68;
+  --text-inverse: #ffffff;
+
+  /* Primary & Secondary Brand Accents */
+  --accent-primary: #07553b;
+  --accent-primary-hover: #053e2b;
+  --accent-primary-active: #02343f;
+  --accent-secondary: #ced46a;
+  --accent-secondary-text: #1c2e24;
+  --ink: #07553b;
+
+  /* Semantic Status Palettes */
+  --status-forming-bg: #fffbeb;
+  --status-forming-border: #d97706;
+  --status-forming-text: #92400e;
+
+  --status-ready-bg: #ecfdf5;
+  --status-ready-border: #059669;
+  --status-ready-text: #065f46;
+
+  --status-full-bg: #f5f3ef;
+  --status-full-border: #a8a29e;
+  --status-full-text: #44403c;
+
+  /* Feedback & Destructive Colours */
+  --danger-bg: #fef2f1;
+  --danger-border: #e67e73;
+  --danger-text: #922318;
+  --danger-solid: #c0392b;
+  --danger-solid-hover: #962d22;
+
+  --success-bg: #eef8f2;
+  --success-border: #38a169;
+  --success-text: #07553b;
+
+  --warning-bg: #fffaf0;
+  --warning-border: #dd6b20;
+  --warning-text: #8c3d0f;
+
+  /* Borders, Focus Rings & Shadows */
+  --border-subtle: #e4dfd5;
+  --border-strong: #c8c1b4;
+  --focus-ring: #07553b;
+  --shadow-sm: 0 1px 2px rgba(30, 28, 26, 0.05);
+  --shadow-md: 0 4px 12px rgba(30, 28, 26, 0.07);
+  --shadow-lg: 0 12px 28px rgba(30, 28, 26, 0.11);
+  --shadow-offset: 0 3px 0 #02343f;
+
+  /* Spacing Scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  /* Border Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 9999px;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* Motion & Animation Durations */
+  --duration-fast: 140ms;
+  --duration-normal: 220ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
