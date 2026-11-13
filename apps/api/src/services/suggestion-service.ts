@@ -8,6 +8,7 @@ import {
   type SkillSignalStatus,
   type SuggestedTeammateCandidateDto,
   type TeammateSuggestionsResponseDto,
+  type TimezoneEvidenceDiagnosticsDto,
 } from '@crewmesh/shared';
 import { getDbPool } from '../db/pool.js';
 import { AppError } from '../plugins/error-handler.js';
@@ -21,6 +22,11 @@ export interface ScoringMemberInput {
   userId: string;
   skills: readonly string[];
   timezone: string | null | undefined;
+  /**
+   * When explicitly `false`, indicates the stored timezone has no confirmation provenance
+   * (`timezone_confirmed_at IS NULL`) and must be treated as unconfirmed (`null`).
+   */
+  timezoneConfirmed?: boolean;
 }
 
 export interface ScoringCandidateInput {
@@ -28,6 +34,11 @@ export interface ScoringCandidateInput {
   displayName: string;
   skills: readonly string[];
   timezone: string | null | undefined;
+  /**
+   * When explicitly `false`, indicates the stored timezone has no confirmation provenance
+   * (`timezone_confirmed_at IS NULL`) and must be treated as unconfirmed (`null`).
+   */
+  timezoneConfirmed?: boolean;
 }
 
 /**
@@ -146,6 +157,7 @@ interface InternalScoredCandidate {
 /**
  * Deterministic scoring engine (`crewmesh-match-v1`).
  * Pure function suitable for both live PostgreSQL candidate evaluation and isolated unit tests.
+ * Strictly honors `timezoneConfirmed` provenance so unconfirmed legacy timezones are never used.
  */
 export function evaluateTeammateCandidates(params: {
   teamDesiredSkills: readonly string[];
@@ -161,6 +173,7 @@ export function evaluateTeammateCandidates(params: {
   };
   skillSignal: SkillSignalStatus;
   unrankableProfiles: number;
+  timezoneEvidence: TimezoneEvidenceDiagnosticsDto;
   candidates: SuggestedTeammateCandidateDto[];
 } {
   const desiredSkills = normalizeSkillTags(params.teamDesiredSkills);
@@ -184,16 +197,21 @@ export function evaluateTeammateCandidates(params: {
   // Memoize IANA timezone offsets at the single server reference timestamp
   const offsetCache = new Map<string, number | null>();
   const validMemberOffsets: number[] = [];
+  let confirmedTeamMembersCount = 0;
 
   for (const member of params.existingMembers) {
-    const offset = getIanaUtcOffsetMinutes(member.timezone, params.referenceDate, offsetCache);
+    const confirmedTz =
+      member.timezoneConfirmed === false ? null : (member.timezone ?? null);
+    const offset = getIanaUtcOffsetMinutes(confirmedTz, params.referenceDate, offsetCache);
     if (offset !== null) {
       validMemberOffsets.push(offset);
+      confirmedTeamMembersCount += 1;
     }
   }
 
   const scoredList: InternalScoredCandidate[] = [];
   let unrankableProfiles = 0;
+  let eligibleCandidatesWithConfirmedTimezone = 0;
 
   for (const cand of params.candidates) {
     const candidateSkills = normalizeSkillTags(cand.skills);
@@ -209,11 +227,17 @@ export function evaluateTeammateCandidates(params: {
         ? (matchedDesiredSkills.length / unmetDesiredSkills.length) * 100
         : null;
 
+    const confirmedCandTz =
+      cand.timezoneConfirmed === false ? null : (cand.timezone ?? null);
     const candOffset = getIanaUtcOffsetMinutes(
-      cand.timezone,
+      confirmedCandTz,
       params.referenceDate,
       offsetCache,
     );
+
+    if (candOffset !== null) {
+      eligibleCandidatesWithConfirmedTimezone += 1;
+    }
 
     let rawTimezoneScore: number | null = null;
     let avgDistanceMinutes: number | null = null;
@@ -290,7 +314,7 @@ export function evaluateTeammateCandidates(params: {
       const avgHours = roundToOneDecimal(avgDistanceMinutes / 60);
       if (avgDistanceMinutes === 0) {
         explanation.push(
-          `Same current UTC offset as existing team members (${cand.timezone}, 0h offset difference, 100% time-zone proximity).`,
+          `Same current UTC offset as existing team members (${confirmedCandTz}, 0h offset difference, 100% time-zone proximity).`,
         );
       } else {
         explanation.push(
@@ -299,11 +323,11 @@ export function evaluateTeammateCandidates(params: {
       }
     } else if (candOffset === null) {
       explanation.push(
-        'Candidate time zone is unavailable or invalid; overall score is renormalized using skill coverage only.',
+        'Candidate time zone is unavailable or invalid (or not yet confirmed); overall score is renormalized using skill coverage only.',
       );
     } else {
       explanation.push(
-        'Existing team members have no valid time-zone data; overall score is renormalized using skill coverage only.',
+        'Existing team members have no valid time-zone data (or not yet confirmed); overall score is renormalized using skill coverage only.',
       );
     }
 
@@ -312,7 +336,7 @@ export function evaluateTeammateCandidates(params: {
         userId: cand.userId,
         displayName: cand.displayName,
         skills: candidateSkills,
-        timezone: candOffset !== null && cand.timezone ? cand.timezone.trim() : null,
+        timezone: candOffset !== null && confirmedCandTz ? confirmedCandTz.trim() : null,
         overallScore: displayOverall,
         skillScore: displaySkill,
         timezoneScore: displayTz,
@@ -356,6 +380,9 @@ export function evaluateTeammateCandidates(params: {
   });
 
   const maxResults = Math.min(Math.max(params.limit ?? 20, 1), 50);
+  const teamMembersCount = params.existingMembers.length;
+  const totalCandCount = params.candidates.length;
+
   return {
     teamSkillSummary: {
       desiredSkills,
@@ -364,6 +391,16 @@ export function evaluateTeammateCandidates(params: {
     },
     skillSignal,
     unrankableProfiles,
+    timezoneEvidence: {
+      teamMembersCount,
+      confirmedTeamMembersCount,
+      unconfirmedTeamMembersCount: Math.max(0, teamMembersCount - confirmedTeamMembersCount),
+      eligibleCandidatesWithConfirmedTimezone,
+      eligibleCandidatesWithUnconfirmedTimezone: Math.max(
+        0,
+        totalCandCount - eligibleCandidatesWithConfirmedTimezone,
+      ),
+    },
     candidates: scoredList.slice(0, maxResults).map((item) => item.dto),
   };
 }
@@ -381,6 +418,7 @@ interface MemberSkillTzRow {
   user_id: string;
   skills: string[];
   timezone: string | null;
+  timezone_confirmed_at: Date | null;
 }
 
 interface CandidateQueryRow {
@@ -388,11 +426,14 @@ interface CandidateQueryRow {
   display_name: string;
   skills: string[];
   timezone: string | null;
+  timezone_confirmed_at: Date | null;
 }
 
 /**
- * Queries PostgreSQL for eligible participants in the hackathon and computes
- * deterministic explainable teammate recommendations for the team leader.
+ * Queries PostgreSQL for eligible registered hackathon participants (`hackathon_participants.status = 'registered'`)
+ * and computes deterministic explainable teammate recommendations for the team leader.
+ * Uses only confirmed time zones (`timezone_confirmed_at IS NOT NULL`) and existing unique indexes
+ * (`team_members_one_team_per_hackathon_unique` and `idx_join_requests_one_pending_per_team_user`).
  */
 export async function getTeammateSuggestionsForLeader(
   params: {
@@ -442,7 +483,8 @@ export async function getTeammateSuggestionsForLeader(
       tm.user_id,
       tm.role,
       u.skills,
-      u.timezone
+      u.timezone,
+      u.timezone_confirmed_at
     FROM team_members tm
     INNER JOIN users u ON u.id = tm.user_id
     WHERE tm.team_id = $1
@@ -472,6 +514,7 @@ export async function getTeammateSuggestionsForLeader(
   }
 
   // Execute candidate eligibility query and exclusion diagnostics in parallel (zero N+1 queries)
+  // Candidate pool requires active registration in `hackathon_participants` for this hackathon.
   const [candidatesRes, diagnosticsRes, clockRes] = await Promise.all([
     pool.query<CandidateQueryRow>(
       `
@@ -479,21 +522,25 @@ export async function getTeammateSuggestionsForLeader(
         u.id,
         u.display_name,
         u.skills,
-        u.timezone
-      FROM users u
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM team_members tm
-        WHERE tm.hackathon_id = $1
-          AND tm.user_id = u.id
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM join_requests jr
-        WHERE jr.team_id = $2
-          AND jr.user_id = u.id
-          AND jr.status = 'pending'
-      )
+        u.timezone,
+        u.timezone_confirmed_at
+      FROM hackathon_participants hp
+      INNER JOIN users u ON u.id = hp.user_id
+      WHERE hp.hackathon_id = $1
+        AND hp.status = 'registered'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM team_members tm
+          WHERE tm.hackathon_id = $1
+            AND tm.user_id = u.id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM join_requests jr
+          WHERE jr.team_id = $2
+            AND jr.user_id = u.id
+            AND jr.status = 'pending'
+        )
       ORDER BY u.id ASC
       `,
       [team.hackathon_id, team.id],
@@ -535,13 +582,15 @@ export async function getTeammateSuggestionsForLeader(
     existingMembers: membersRes.rows.map((m) => ({
       userId: m.user_id,
       skills: Array.isArray(m.skills) ? m.skills : [],
-      timezone: m.timezone,
+      timezone: m.timezone_confirmed_at !== null ? m.timezone : null,
+      timezoneConfirmed: m.timezone !== null && m.timezone_confirmed_at !== null,
     })),
     candidates: candidatesRes.rows.map((c) => ({
       userId: c.id,
       displayName: c.display_name,
       skills: Array.isArray(c.skills) ? c.skills : [],
-      timezone: c.timezone,
+      timezone: c.timezone_confirmed_at !== null ? c.timezone : null,
+      timezoneConfirmed: c.timezone !== null && c.timezone_confirmed_at !== null,
     })),
     referenceDate,
     limit: params.limit ?? 20,
@@ -570,6 +619,7 @@ export async function getTeammateSuggestionsForLeader(
       excludedExistingRequests: diagRow?.excluded_existing_requests ?? 0,
       unrankableProfiles: evaluated.unrankableProfiles,
       skillSignal: evaluated.skillSignal,
+      timezoneEvidence: evaluated.timezoneEvidence,
     },
   };
 }

@@ -23,6 +23,20 @@ import {
 } from '../security/crypto.js';
 import { consumeRateLimitBucket } from '../security/rate-limit.js';
 
+const optionalTimezoneSchema = z
+  .union([z.string(), z.null(), z.undefined()])
+  .transform((val) => {
+    if (val === null || val === undefined) {
+      return null;
+    }
+    const trimmed = val.trim();
+    return trimmed.length === 0 ? null : trimmed;
+  })
+  .refine(
+    (val) => val === null || isValidIanaTimeZone(val),
+    'Must be a valid IANA time zone (e.g. Asia/Kolkata, UTC)',
+  );
+
 const registerBodySchema = z.object({
   email: z
     .string()
@@ -40,12 +54,10 @@ const registerBodySchema = z.object({
     .min(2, 'Display name must be at least 2 characters')
     .max(80, 'Display name must not exceed 80 characters'),
   skills: z.array(z.string()).max(25).optional().default([]),
-  timezone: z
-    .string()
-    .trim()
-    .default('UTC')
-    .refine(isValidIanaTimeZone, 'Must be a valid IANA time zone (e.g. Asia/Kolkata, UTC)'),
+  timezone: optionalTimezoneSchema.optional().default(null),
   bio: z.string().trim().max(500).optional().default(''),
+  hackathonId: z.string().trim().min(2).max(64).optional(),
+  enrollInActiveHackathon: z.boolean().optional().default(true),
 });
 
 const loginBodySchema = z.object({
@@ -56,11 +68,7 @@ const loginBodySchema = z.object({
 const updateProfileBodySchema = z.object({
   displayName: z.string().trim().min(2).max(80).optional(),
   skills: z.array(z.string()).max(25).optional(),
-  timezone: z
-    .string()
-    .trim()
-    .refine(isValidIanaTimeZone, 'Must be a valid IANA time zone')
-    .optional(),
+  timezone: optionalTimezoneSchema.optional(),
   bio: z.string().trim().max(500).optional(),
 });
 
@@ -70,19 +78,30 @@ interface UserRow {
   password_hash: string;
   display_name: string;
   skills: string[];
-  timezone: string;
+  timezone: string | null;
+  timezone_confirmed_at: Date | null;
   bio: string;
   created_at: Date;
   updated_at: Date;
 }
 
 function mapUserToPublicProfile(row: UserRow): PublicUserProfile {
+  const isConfirmed = row.timezone !== null && row.timezone_confirmed_at !== null;
+  const confirmedIso =
+    isConfirmed && row.timezone_confirmed_at
+      ? row.timezone_confirmed_at instanceof Date
+        ? row.timezone_confirmed_at.toISOString()
+        : String(row.timezone_confirmed_at)
+      : null;
+
   return {
     id: row.id,
     email: row.email,
     displayName: row.display_name,
     skills: Array.isArray(row.skills) ? row.skills : [],
-    timezone: row.timezone,
+    timezone: isConfirmed ? row.timezone : null,
+    timezoneConfirmed: isConfirmed,
+    timezoneConfirmedAt: confirmedIso,
     bio: row.bio,
     createdAt:
       row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
@@ -94,12 +113,15 @@ function mapUserToPublicProfile(row: UserRow): PublicUserProfile {
 export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   /**
    * POST /api/v1/auth/register
-   * Normalizes email, hashes password with Argon2id, creates user and initial session transactionally.
+   * Normalizes email, hashes password with Argon2id, records explicit timezone confirmation
+   * provenance ONLY when the participant provides a valid IANA time zone (never fabricating UTC),
+   * enrolls the participant in the active hackathon when requested, and creates the session transactionally.
    */
   app.post('/api/v1/auth/register', async (request, reply) => {
     const env = getEnv();
     const body = registerBodySchema.parse(request.body);
     const normalizedSkills = normalizeSkillTags(body.skills);
+    const explicitTimezone = body.timezone ?? null;
 
     // Rate limit registration attempts by IP
     const ipLimit = await consumeRateLimitBucket({
@@ -110,7 +132,11 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!ipLimit.allowed) {
       reply.header('Retry-After', String(ipLimit.retryAfterSeconds));
-      throw new AppError(429, 'RATE_LIMITED', 'Too many registration attempts. Please try again later.');
+      throw new AppError(
+        429,
+        'RATE_LIMITED',
+        'Too many registration attempts. Please try again later.',
+      );
     }
 
     const passwordHash = await hashPassword(body.password);
@@ -124,16 +150,79 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       const result = await withTransaction(async (client) => {
         const userRes = await client.query<UserRow>(
           `
-          INSERT INTO users (email, password_hash, display_name, skills, timezone, bio)
-          VALUES ($1, $2, $3, $4, $5, $6)
-          RETURNING id, email, password_hash, display_name, skills, timezone, bio, created_at, updated_at
+          INSERT INTO users (
+            email,
+            password_hash,
+            display_name,
+            skills,
+            timezone,
+            timezone_confirmed_at,
+            bio
+          )
+          VALUES (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5::text,
+            CASE WHEN $5::text IS NOT NULL THEN NOW() ELSE NULL END,
+            $6
+          )
+          RETURNING
+            id,
+            email,
+            password_hash,
+            display_name,
+            skills,
+            timezone,
+            timezone_confirmed_at,
+            bio,
+            created_at,
+            updated_at
           `,
-          [body.email, passwordHash, body.displayName, normalizedSkills, body.timezone, body.bio],
+          [
+            body.email,
+            passwordHash,
+            body.displayName,
+            normalizedSkills,
+            explicitTimezone,
+            body.bio,
+          ],
         );
 
         const userRow = userRes.rows[0];
         if (!userRow) {
           throw new Error('Failed to insert user row');
+        }
+
+        // Enroll in hackathon_participants when enrollInActiveHackathon is true (default)
+        if (body.enrollInActiveHackathon !== false) {
+          if (body.hackathonId) {
+            await client.query(
+              `
+              INSERT INTO hackathon_participants (hackathon_id, user_id, status)
+              SELECT id, $2, 'registered'
+              FROM hackathons
+              WHERE id::text = $1 OR slug = $1
+              LIMIT 1
+              ON CONFLICT (hackathon_id, user_id) DO NOTHING
+              `,
+              [body.hackathonId, userRow.id],
+            );
+          } else {
+            await client.query(
+              `
+              INSERT INTO hackathon_participants (hackathon_id, user_id, status)
+              SELECT id, $1, 'registered'
+              FROM hackathons
+              WHERE is_active = TRUE
+              ORDER BY created_at ASC
+              LIMIT 1
+              ON CONFLICT (hackathon_id, user_id) DO NOTHING
+              `,
+              [userRow.id],
+            );
+          }
         }
 
         const sessionRes = await client.query<{ expires_at: Date }>(
@@ -214,7 +303,17 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     const pool = getDbPool();
     const userRes = await pool.query<UserRow>(
       `
-      SELECT id, email, password_hash, display_name, skills, timezone, bio, created_at, updated_at
+      SELECT
+        id,
+        email,
+        password_hash,
+        display_name,
+        skills,
+        timezone,
+        timezone_confirmed_at,
+        bio,
+        created_at,
+        updated_at
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -337,16 +436,20 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   /**
    * PATCH /api/v1/auth/profile
    * Updates the authenticated user's display name, skills, IANA timezone, or bio.
+   * Explicitly records `timezone_confirmed_at = NOW()` when a participant sets/confirms a timezone,
+   * or clears both `timezone` and `timezone_confirmed_at` when `timezone: null` is sent.
    */
   app.patch('/api/v1/auth/profile', { preHandler: [requireAuth] }, async (request, reply) => {
     const session = request.authSession!;
-    const body = updateProfileBodySchema.parse(request.body);
+    const rawBody = (request.body ?? {}) as Record<string, unknown>;
+    const hasTimezoneField = Object.prototype.hasOwnProperty.call(rawBody, 'timezone');
+    const body = updateProfileBodySchema.parse(rawBody);
 
     const displayName = body.displayName ?? session.user.displayName;
     const skills =
       body.skills !== undefined ? normalizeSkillTags(body.skills) : session.user.skills;
-    const timezone = body.timezone ?? session.user.timezone;
     const bio = body.bio ?? session.user.bio;
+    const nextTimezone = hasTimezoneField ? (body.timezone ?? null) : session.user.timezone;
 
     const pool = getDbPool();
     const res = await pool.query<UserRow>(
@@ -355,13 +458,28 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       SET
         display_name = $2,
         skills = $3,
-        timezone = $4,
+        timezone = $4::text,
+        timezone_confirmed_at = CASE
+          WHEN $6::boolean = TRUE AND $4::text IS NOT NULL THEN NOW()
+          WHEN $6::boolean = TRUE AND $4::text IS NULL THEN NULL
+          ELSE timezone_confirmed_at
+        END,
         bio = $5,
         updated_at = NOW()
       WHERE id = $1
-      RETURNING id, email, password_hash, display_name, skills, timezone, bio, created_at, updated_at
+      RETURNING
+        id,
+        email,
+        password_hash,
+        display_name,
+        skills,
+        timezone,
+        timezone_confirmed_at,
+        bio,
+        created_at,
+        updated_at
       `,
-      [session.user.id, displayName, skills, timezone, bio],
+      [session.user.id, displayName, skills, nextTimezone, bio, hasTimezoneField],
     );
 
     const updated = res.rows[0];

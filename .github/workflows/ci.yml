@@ -58,7 +58,7 @@ jobs:
       - name: Install dependencies deterministically
         run: npm ci
 
-      - name: Apply PostgreSQL migrations
+      - name: Apply PostgreSQL migrations (001 through 005)
         run: npm run db:migrate
 
       - name: Seed Hack4Hack 2026 event configuration
@@ -73,10 +73,10 @@ jobs:
       - name: Build shared, API, and Web production bundles
         run: npm run build
 
-      - name: Run isolated unit tests (Batches 1–5)
+      - name: Run isolated unit tests (Batches 1–6)
         run: npm run test:unit:sandbox
 
-      - name: Run PostgreSQL API, SSE & Suggestions integration suites (Batches 1–5)
+      - name: Run PostgreSQL API, SSE, Suggestions & Scale Safety integration suites (Batches 1–6)
         run: npm run test:integration --workspace=@crewmesh/api
 
       - name: Run 50-way last-seat concurrency & invite use-limit race proofs
@@ -102,3 +102,85 @@ jobs:
           done
           npm run test:e2e
           kill $API_PID $WEB_PID || true
+
+  scale-and-k6-benchmark:
+    name: Batch 06 — 10k Participants, 2k Teams Scale Seed & 100-VU k6 Board Benchmark (p95 < 200ms)
+    runs-on: ubuntu-latest
+    needs: verify-and-test
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgresql://crewmesh:crewmesh_ci_loadtest_password@localhost:5432/crewmesh_loadtest
+      TEST_DATABASE_URL: postgresql://crewmesh:crewmesh_ci_loadtest_password@localhost:5432/crewmesh_loadtest
+      CREWMESH_ALLOW_SCALE_SEED: 'true'
+      DB_POOL_MAX: 40
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: crewmesh
+          POSTGRES_PASSWORD: crewmesh_ci_loadtest_password
+          POSTGRES_DB: crewmesh_loadtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U crewmesh -d crewmesh_loadtest"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies deterministically
+        run: npm ci
+
+      - name: Apply PostgreSQL migrations (001 through 005) on isolated crewmesh_loadtest database
+        run: npm run db:migrate
+
+      - name: Seed Hack4Hack 2026 event configuration without invented deadline
+        run: npm run db:seed
+
+      - name: Execute 10,000-participant / 2,000-team scale seeder and capture SQL counts + EXPLAIN ANALYZE plans
+        run: npm run db:seed:scale
+
+      - name: Run PostgreSQL scale seed integration and idempotency verification against crewmesh_loadtest
+        run: npm run test:scale --workspace=@crewmesh/api
+
+      - name: Build production shared and API bundles
+        run: npm run build --workspace=@crewmesh/shared && npm run build --workspace=@crewmesh/api
+
+      - name: Install official Grafana k6 load testing binary
+        uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: v0.52.0
+
+      - name: Start Fastify production server and execute two 100-VU 60-second k6 board benchmarks
+        run: |
+          npm run start --workspace=@crewmesh/api &
+          API_PID=$!
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3001/ready >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          K6_REPORT_DIR=reports/load-test k6 run apps/api/load/board.k6.js
+          cp reports/load-test/k6-summary.json reports/load-test/k6-summary-run1.json
+          cp reports/load-test/k6-summary.txt reports/load-test/k6-summary-run1.txt
+          K6_REPORT_DIR=reports/load-test k6 run apps/api/load/board.k6.js
+          kill $API_PID || true
+
+      - name: Upload k6 benchmark and PostgreSQL EXPLAIN artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crewmesh-batch6-load-test-reports
+          path: reports/load-test/
+          retention-days: 30

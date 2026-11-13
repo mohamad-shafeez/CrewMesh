@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import {
   computeTeamStatus,
   normalizeSkillTags,
+  type HackathonParticipantStatus,
   type PublicMemberSummary,
   type TeamBoardPageResponse,
   type TeamDetailsDto,
@@ -49,7 +50,8 @@ interface HydratedMemberRow {
   user_id: string;
   display_name: string;
   skills: string[];
-  timezone: string;
+  timezone: string | null;
+  timezone_confirmed_at: Date | null;
   bio: string;
   role: TeamRole;
   joined_at: Date;
@@ -106,6 +108,37 @@ export async function resolveHackathonOrThrow(
     );
   }
   return row;
+}
+
+/**
+ * Ensures `userId` is an active registered participant in `hackathonId`.
+ * If no row exists yet, registers the participant automatically; if `status` is
+ * `'withdrawn'` or `'disqualified'`, rejects with `403 NOT_HACKATHON_PARTICIPANT`.
+ */
+export async function ensureHackathonParticipantTx(
+  client: PoolClient,
+  hackathonId: string,
+  userId: string,
+): Promise<void> {
+  const res = await client.query<{ status: HackathonParticipantStatus }>(
+    `
+    INSERT INTO hackathon_participants (hackathon_id, user_id, status)
+    VALUES ($1, $2, 'registered')
+    ON CONFLICT (hackathon_id, user_id) DO UPDATE SET
+      status = hackathon_participants.status
+    RETURNING status
+    `,
+    [hackathonId, userId],
+  );
+
+  const status = res.rows[0]?.status;
+  if (status && status !== 'registered') {
+    throw new AppError(
+      403,
+      'NOT_HACKATHON_PARTICIPANT',
+      `User is not an active participant in this hackathon (status: ${status})`,
+    );
+  }
 }
 
 /**
@@ -186,6 +219,7 @@ export async function assertTeamLeaderTx(
 
 /**
  * Batch-hydrates a list of team rows with their active members in a single query (zero N+1 queries).
+ * Exposes `timezone` ONLY when `timezone_confirmed_at IS NOT NULL` (never fabricating UTC).
  */
 export async function hydrateTeamRows(
   teamRows: LockedTeamRow[],
@@ -204,6 +238,7 @@ export async function hydrateTeamRows(
       u.display_name,
       u.skills,
       u.timezone,
+      u.timezone_confirmed_at,
       u.bio,
       tm.role,
       tm.joined_at
@@ -211,6 +246,7 @@ export async function hydrateTeamRows(
     INNER JOIN users u ON u.id = tm.user_id
     WHERE tm.team_id = ANY($1::uuid[])
     ORDER BY
+      tm.team_id ASC,
       CASE WHEN tm.role = 'leader' THEN 0 ELSE 1 END ASC,
       tm.joined_at ASC,
       tm.user_id ASC
@@ -225,7 +261,7 @@ export async function hydrateTeamRows(
       userId: row.user_id,
       displayName: row.display_name,
       skills: Array.isArray(row.skills) ? row.skills : [],
-      timezone: row.timezone,
+      timezone: row.timezone_confirmed_at !== null ? row.timezone : null,
       bio: row.bio,
       role: row.role,
       joinedAt:
@@ -243,7 +279,7 @@ export async function hydrateTeamRows(
         userId: team.leader_user_id,
         displayName: 'Team Leader',
         skills: [],
-        timezone: 'UTC',
+        timezone: null,
         bio: '',
         role: 'leader' as const,
         joinedAt:
@@ -453,6 +489,8 @@ export async function addMemberToLockedTeamTx(
 ): Promise<{ memberCount: number; status: TeamStatus }> {
   const { team, candidateUserId } = params;
 
+  await ensureHackathonParticipantTx(client, team.hackathon_id, candidateUserId);
+
   const countRes = await client.query<{ cnt: number }>(
     'SELECT COUNT(*)::int AS cnt FROM team_members WHERE team_id = $1',
     [team.id],
@@ -580,6 +618,8 @@ export async function createTeamTx(
   const hackathon = await resolveHackathonOrThrow(params.hackathonIdOrSlug, client, {
     requireRegistrationOpen: true,
   });
+
+  await ensureHackathonParticipantTx(client, hackathon.id, params.actorUserId);
 
   const minSize = params.minTeamSizeOverride ?? hackathon.min_team_size;
   const maxSize = params.maxTeamSizeOverride ?? hackathon.max_team_size;
@@ -850,9 +890,9 @@ export async function removeMemberTx(
 
   if (params.targetUserId === params.actorUserId) {
     throw new AppError(
-      400,
+      409,
       'LEADER_MUST_USE_LEAVE',
-      'Team leader cannot remove themselves via member removal; use the leave endpoint so leadership succession is enforced',
+      'Team leader cannot remove themselves via member removal; use the leave team endpoint instead',
     );
   }
 
@@ -905,7 +945,6 @@ export async function removeMemberTx(
     `,
     [team.id, newCount, newStatus],
   );
-
   const updatedTeam = updatedTeamRes.rows[0]!;
 
   await insertAuditLog(client, {
@@ -956,10 +995,12 @@ export interface LeaveTeamResultDto {
 }
 
 /**
- * Member leaves a team transactionally:
- * - If ordinary member leaves: updates member_count and forming/ready status.
- * - If leader leaves and members remain: promotes earliest-joined remaining member (joined_at ASC, user_id ASC).
- * - If last member leaves: writes durable audit/outbox entries and deletes the team while preserving audit history.
+ * Member or leader leaves the team transactionally:
+ * - If the departing member is the LAST member (`COUNT(*) == 1`), deletes the team row
+ *   (while preserving `audit_log` and `outbox_events` with `TEAM_DELETED`).
+ * - If the departing member is the leader and other members remain, deterministically
+ *   promotes the earliest-joined remaining member (`ORDER BY joined_at ASC, user_id ASC`)
+ *   to `'leader'` in the same transaction (`LEADER_SUCCESSION`).
  */
 export async function leaveTeamTx(
   client: PoolClient,
@@ -989,14 +1030,13 @@ export async function leaveTeamTx(
 
   const callerMember = membersRes.rows.find((m) => m.user_id === params.actorUserId);
   if (!callerMember) {
-    throw new AppError(
-      403,
-      'NOT_A_TEAM_MEMBER',
-      'Only an active member of this team can leave it',
-    );
+    throw new AppError(403, 'NOT_A_TEAM_MEMBER', 'You are not a member of this team');
   }
 
   if (membersRes.rows.length === 1) {
+    // Last member leaving: delete the team (cascade deletes team_members, join_requests, invite_codes)
+    await client.query('DELETE FROM teams WHERE id = $1', [team.id]);
+
     await insertAuditLog(client, {
       hackathonId: team.hackathon_id,
       teamId: team.id,
@@ -1008,7 +1048,6 @@ export async function leaveTeamTx(
       requestId: params.requestId,
       metadata: {
         lastMember: true,
-        memberCountAfter: 0,
       },
     });
 
@@ -1021,8 +1060,8 @@ export async function leaveTeamTx(
       entityId: team.id,
       requestId: params.requestId,
       metadata: {
-        teamName: team.name,
         reason: 'last_member_left',
+        teamName: team.name,
       },
     });
 
@@ -1035,10 +1074,9 @@ export async function leaveTeamTx(
         teamId: team.id,
         hackathonId: team.hackathon_id,
         actorUserId: params.actorUserId,
+        reason: 'last_member_left',
       },
     });
-
-    await client.query('DELETE FROM teams WHERE id = $1', [team.id]);
 
     return {
       statusCode: 200,

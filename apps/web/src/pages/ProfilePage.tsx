@@ -16,7 +16,7 @@ export function ProfilePage({
 }: ProfilePageProps): React.JSX.Element {
   const [displayName, setDisplayName] = useState<string>(user.displayName);
   const [skillsInput, setSkillsInput] = useState<string>(user.skills.join(', '));
-  const [timezone, setTimezone] = useState<string>(user.timezone);
+  const [timezone, setTimezone] = useState<string>(user.timezone ?? '');
   const [bio, setBio] = useState<string>(user.bio);
   const [saving, setSaving] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -27,8 +27,9 @@ export function ProfilePage({
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    if (!isValidIanaTimeZone(timezone)) {
-      setErrorMessage('Please enter a valid IANA time zone (e.g., Asia/Kolkata, UTC, America/New_York).');
+    const trimmedTz = timezone.trim();
+    if (trimmedTz.length > 0 && !isValidIanaTimeZone(trimmedTz)) {
+      setErrorMessage('Please enter a valid IANA time zone (e.g., Asia/Kolkata, UTC, America/New_York) or leave blank if unconfirmed.');
       return;
     }
 
@@ -42,11 +43,12 @@ export function ProfilePage({
       const res = await updateProfile({
         displayName: displayName.trim(),
         skills: parsedSkills,
-        timezone: timezone.trim(),
+        timezone: trimmedTz.length > 0 ? trimmedTz : null,
         bio: bio.trim(),
       });
       onUserUpdated(res.user);
       setSkillsInput(res.user.skills.join(', '));
+      setTimezone(res.user.timezone ?? '');
       setSuccessMessage('Profile saved to PostgreSQL.');
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -79,8 +81,8 @@ export function ProfilePage({
       </div>
 
       <p style={{ color: 'var(--text-secondary)', marginBottom: '1.25rem' }}>
-        Signed in as <strong>{user.email}</strong>. Keep your skills and IANA time zone accurate so
-        team leaders can evaluate your fit.
+        Signed in as <strong>{user.email}</strong>. Keep your skills and confirmed IANA time zone
+        accurate so team leaders can evaluate your fit.
       </p>
 
       {errorMessage ? (
@@ -128,10 +130,15 @@ export function ProfilePage({
             id="profile-timezone"
             name="timezone"
             type="text"
-            required
+            placeholder="e.g. Asia/Kolkata, America/New_York, UTC"
             value={timezone}
             onChange={(e) => setTimezone(e.target.value)}
           />
+          <span className="field-hint">
+            {user.timezoneConfirmed && user.timezone
+              ? `Confirmed time zone (${user.timezone}). Clear field to mark unconfirmed.`
+              : 'Not yet confirmed. Enter a valid IANA time zone and save to confirm.'}
+          </span>
         </div>
 
         <div className="form-field">

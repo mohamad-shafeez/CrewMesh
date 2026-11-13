@@ -30,7 +30,8 @@ interface SessionLookupRow {
   email: string;
   display_name: string;
   skills: string[];
-  timezone: string;
+  timezone: string | null;
+  timezone_confirmed_at: Date | null;
   bio: string;
   user_created_at: Date;
   user_updated_at: Date;
@@ -117,6 +118,7 @@ export function registerAuthSession(app: FastifyInstance): void {
         u.display_name,
         u.skills,
         u.timezone,
+        u.timezone_confirmed_at,
         u.bio,
         u.created_at AS user_created_at,
         u.updated_at AS user_updated_at
@@ -136,6 +138,13 @@ export function registerAuthSession(app: FastifyInstance): void {
     }
 
     const csrfToken = deriveCsrfToken(row.token_hash, env.CSRF_SECRET);
+    const isConfirmed = row.timezone !== null && row.timezone_confirmed_at !== null;
+    const confirmedIso =
+      isConfirmed && row.timezone_confirmed_at
+        ? row.timezone_confirmed_at instanceof Date
+          ? row.timezone_confirmed_at.toISOString()
+          : String(row.timezone_confirmed_at)
+        : null;
 
     request.authSession = {
       sessionId: row.session_id,
@@ -149,7 +158,9 @@ export function registerAuthSession(app: FastifyInstance): void {
         email: row.email,
         displayName: row.display_name,
         skills: Array.isArray(row.skills) ? row.skills : [],
-        timezone: row.timezone,
+        timezone: isConfirmed ? row.timezone : null,
+        timezoneConfirmed: isConfirmed,
+        timezoneConfirmedAt: confirmedIso,
         bio: row.bio,
         createdAt:
           row.user_created_at instanceof Date

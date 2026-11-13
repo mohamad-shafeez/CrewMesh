@@ -7,6 +7,7 @@ export type TeamStatus = 'forming' | 'ready';
 export type TeamRole = 'leader' | 'member';
 export type JoinRequestStatus = 'pending' | 'accepted' | 'declined' | 'cancelled' | 'expired';
 export type JoinRequestSource = 'board' | 'invite_code';
+export type HackathonParticipantStatus = 'registered' | 'withdrawn' | 'disqualified';
 
 export type AuditAction =
   | 'TEAM_CREATED'
@@ -50,6 +51,7 @@ export type ApiErrorCode =
   | 'HACKATHON_NOT_FOUND'
   | 'HACKATHON_INACTIVE'
   | 'HACKATHON_REGISTRATION_CLOSED'
+  | 'NOT_HACKATHON_PARTICIPANT'
   | 'TEAM_NOT_FOUND'
   | 'TEAM_FULL'
   | 'TEAM_NOT_RECRUITING'
@@ -89,7 +91,13 @@ export interface PublicUserProfile {
   email: string;
   displayName: string;
   skills: string[];
-  timezone: string;
+  /**
+   * Confirmed IANA time zone, or `null` if the participant has not explicitly confirmed a time zone.
+   * Unconfirmed legacy defaults are never exposed as confirmed UTC.
+   */
+  timezone: string | null;
+  timezoneConfirmed: boolean;
+  timezoneConfirmedAt: string | null;
   bio: string;
   createdAt: string;
   updatedAt: string;
@@ -98,12 +106,13 @@ export interface PublicUserProfile {
 /**
  * Privacy-safe participant representation for public team boards and member lists.
  * Never includes email, password_hash, or session metadata.
+ * `timezone` is `null` unless explicitly confirmed by the participant (`timezone_confirmed_at IS NOT NULL`).
  */
 export interface PublicMemberSummary {
   userId: string;
   displayName: string;
   skills: string[];
-  timezone: string;
+  timezone: string | null;
   bio: string;
   role: TeamRole;
   joinedAt: string;
@@ -163,7 +172,7 @@ export interface JoinRequestDto {
     userId: string;
     displayName: string;
     skills: string[];
-    timezone: string;
+    timezone: string | null;
     bio: string;
   };
 }
@@ -215,7 +224,7 @@ export interface InviteRedeemResultDto {
 }
 
 /**
- * Batch 05 — Teammate Suggestion Algorithm Constants & Contracts (crewmesh-match-v1)
+ * Batch 05 & 06 — Teammate Suggestion Algorithm Constants & Contracts (crewmesh-match-v1)
  */
 export const CREWMESH_MATCH_ALGORITHM_VERSION = 'crewmesh-match-v1' as const;
 
@@ -245,6 +254,14 @@ export interface SuggestedTeammateCandidateDto {
   explanation: string[];
 }
 
+export interface TimezoneEvidenceDiagnosticsDto {
+  teamMembersCount: number;
+  confirmedTeamMembersCount: number;
+  unconfirmedTeamMembersCount: number;
+  eligibleCandidatesWithConfirmedTimezone: number;
+  eligibleCandidatesWithUnconfirmedTimezone: number;
+}
+
 export interface TeammateSuggestionsResponseDto {
   teamId: string;
   hackathonId: string;
@@ -270,6 +287,7 @@ export interface TeammateSuggestionsResponseDto {
     excludedExistingRequests: number;
     unrankableProfiles: number;
     skillSignal: SkillSignalStatus;
+    timezoneEvidence: TimezoneEvidenceDiagnosticsDto;
   };
 }
 
@@ -328,8 +346,10 @@ export interface RegisterRequestDto {
   password: string;
   displayName: string;
   skills?: string[];
-  timezone?: string;
+  timezone?: string | null;
   bio?: string;
+  hackathonId?: string;
+  enrollInActiveHackathon?: boolean;
 }
 
 export interface LoginRequestDto {
@@ -340,7 +360,7 @@ export interface LoginRequestDto {
 export interface UpdateProfileRequestDto {
   displayName?: string;
   skills?: string[];
-  timezone?: string;
+  timezone?: string | null;
   bio?: string;
 }
 

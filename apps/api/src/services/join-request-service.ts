@@ -13,6 +13,7 @@ import { decodeKeysetCursor, encodeKeysetCursor } from './cursor.js';
 import {
   addMemberToLockedTeamTx,
   assertTeamLeaderTx,
+  ensureHackathonParticipantTx,
   getTeamByIdOrThrow,
   lockTeamByIdOrThrow,
   resolveHackathonOrThrow,
@@ -35,11 +36,19 @@ export interface JoinRequestRow {
   updated_at: Date;
   applicant_display_name?: string;
   applicant_skills?: string[];
-  applicant_timezone?: string;
+  applicant_timezone?: string | null;
+  applicant_timezone_confirmed_at?: Date | null;
   applicant_bio?: string;
 }
 
 export function mapJoinRequestRow(row: JoinRequestRow): JoinRequestDto {
+  const confirmedTimezone =
+    row.applicant_timezone_confirmed_at !== undefined
+      ? row.applicant_timezone_confirmed_at !== null
+        ? (row.applicant_timezone ?? null)
+        : null
+      : (row.applicant_timezone ?? null);
+
   return {
     id: row.id,
     teamId: row.team_id,
@@ -66,7 +75,7 @@ export function mapJoinRequestRow(row: JoinRequestRow): JoinRequestDto {
             userId: row.user_id,
             displayName: row.applicant_display_name,
             skills: Array.isArray(row.applicant_skills) ? row.applicant_skills : [],
-            timezone: row.applicant_timezone ?? 'UTC',
+            timezone: confirmedTimezone,
             bio: row.applicant_bio ?? '',
           },
         }
@@ -90,6 +99,9 @@ export async function createJoinRequestTx(
   await resolveHackathonOrThrow(team.hackathon_id, client, {
     requireRegistrationOpen: true,
   });
+
+  // Verify/ensure the applicant is a registered participant in this hackathon
+  await ensureHackathonParticipantTx(client, team.hackathon_id, params.actorUserId);
 
   // Check if user is already in this team or another team in the same hackathon
   const memberCheck = await client.query<{ team_id: string }>(
@@ -278,6 +290,7 @@ export async function listTeamJoinRequestsForLeader(
       u.display_name AS applicant_display_name,
       u.skills AS applicant_skills,
       u.timezone AS applicant_timezone,
+      u.timezone_confirmed_at AS applicant_timezone_confirmed_at,
       u.bio AS applicant_bio
     FROM join_requests jr
     INNER JOIN users u ON u.id = jr.user_id
@@ -317,9 +330,10 @@ export async function listTeamJoinRequestsForLeader(
  * 2. Verifies caller is the current leader in PostgreSQL.
  * 3. Locks the target `join_requests` row with `SELECT ... FOR UPDATE`.
  * 4. Verifies request belongs to team and is still `'pending'`.
- * 5. Calls `addMemberToLockedTeamTx` (verifying capacity against `COUNT(*)` in `team_members`
+ * 5. If `source === 'invite_code'`, locks and increments `invite_codes.use_count` atomically.
+ * 6. Calls `addMemberToLockedTeamTx` (verifying capacity against `COUNT(*)` in `team_members`
  *    and enforcing `UNIQUE (hackathon_id, user_id)`).
- * 6. Marks the join request `'accepted'` and writes audit + outbox events in the same transaction.
+ * 7. Marks the join request `'accepted'` and writes audit + outbox events in the same transaction.
  */
 export async function acceptJoinRequestTx(
   client: PoolClient,
@@ -337,13 +351,13 @@ export async function acceptJoinRequestTx(
     throw new AppError(404, 'JOIN_REQUEST_NOT_FOUND', 'Join request not found');
   }
 
-  // Step 3: Lock target team row FOR UPDATE
+  // Step 1: Lock target team row FOR UPDATE
   const team = await lockTeamByIdOrThrow(client, params.teamId);
 
-  // Step 4: Verify leader permissions inside transaction
+  // Step 2: Verify leader permissions inside transaction
   await assertTeamLeaderTx(client, team, params.actorUserId);
 
-  // Step 5: Lock the target join request FOR UPDATE
+  // Step 3: Lock the target join request FOR UPDATE
   const reqRes = await client.query<JoinRequestRow>(
     `
     SELECT
@@ -360,39 +374,95 @@ export async function acceptJoinRequestTx(
       created_at,
       updated_at
     FROM join_requests
-    WHERE id = $1 AND team_id = $2
+    WHERE id = $1
     FOR UPDATE
     `,
-    [params.joinRequestId, team.id],
+    [params.joinRequestId],
   );
 
-  const reqRow = reqRes.rows[0];
-  if (!reqRow) {
+  const joinReq = reqRes.rows[0];
+  if (!joinReq || joinReq.team_id !== team.id) {
     throw new AppError(404, 'JOIN_REQUEST_NOT_FOUND', 'Join request not found for this team');
   }
 
-  if (reqRow.status !== 'pending') {
+  if (joinReq.status !== 'pending') {
     throw new AppError(
       409,
       'JOIN_REQUEST_ALREADY_PROCESSED',
-      `Join request has already been ${reqRow.status}`,
+      `Join request has already been ${joinReq.status}`,
     );
   }
 
-  // Steps 6-10: Execute serialized membership addition while holding team lock
-  const membershipOutcome = await addMemberToLockedTeamTx(client, {
+  await resolveHackathonOrThrow(team.hackathon_id, client, {
+    requireRegistrationOpen: true,
+  });
+
+  // If this join request originated from an invitation code, atomically validate & consume a use slot
+  if (joinReq.source === 'invite_code' && joinReq.invite_code_id) {
+    const inviteRes = await client.query<{
+      id: string;
+      token_prefix: string;
+      max_uses: number | null;
+      use_count: number;
+      expires_at: Date;
+      revoked_at: Date | null;
+      is_expired: boolean;
+    }>(
+      `
+      SELECT
+        id,
+        token_prefix,
+        max_uses,
+        use_count,
+        expires_at,
+        revoked_at,
+        (expires_at <= NOW()) AS is_expired
+      FROM invite_codes
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [joinReq.invite_code_id],
+    );
+
+    const invite = inviteRes.rows[0];
+    if (!invite) {
+      throw new AppError(404, 'INVALID_INVITE_CODE', 'Associated invitation code no longer exists');
+    }
+    if (invite.revoked_at !== null) {
+      throw new AppError(410, 'INVITE_REVOKED', 'Associated invitation code has been revoked');
+    }
+    if (invite.is_expired) {
+      throw new AppError(410, 'INVITE_EXPIRED', 'Associated invitation code has expired');
+    }
+    if (invite.max_uses !== null && invite.use_count >= invite.max_uses) {
+      throw new AppError(
+        409,
+        'INVITE_MAX_USES_REACHED',
+        'Associated invitation code has reached its maximum allowed uses',
+      );
+    }
+
+    await client.query(
+      'UPDATE invite_codes SET use_count = use_count + 1 WHERE id = $1',
+      [invite.id],
+    );
+  }
+
+  // Step 5: Add member via shared serialized membership engine
+  const added = await addMemberToLockedTeamTx(client, {
     team,
-    candidateUserId: reqRow.user_id,
+    candidateUserId: joinReq.user_id,
     actorUserId: params.actorUserId,
     requestId: params.requestId,
+    sourceAuditAction: 'JOIN_REQUEST_ACCEPTED',
+    sourceEntityId: joinReq.id,
     sourceMetadata: {
-      joinRequestId: reqRow.id,
-      source: reqRow.source,
-      inviteCodeId: reqRow.invite_code_id,
+      joinRequestId: joinReq.id,
+      source: joinReq.source,
     },
   });
 
-  // Update join request status to accepted
+  // Step 6: Update join_request status to 'accepted'
   const updatedReqRes = await client.query<JoinRequestRow>(
     `
     UPDATE join_requests
@@ -416,45 +486,68 @@ export async function acceptJoinRequestTx(
       created_at,
       updated_at
     `,
-    [reqRow.id, params.actorUserId],
+    [joinReq.id, params.actorUserId],
   );
   const updatedReq = updatedReqRes.rows[0]!;
 
-  // Write JOIN_REQUEST_ACCEPTED audit & outbox records
+  // Expire any other pending join requests by this user in the same hackathon
+  await client.query(
+    `
+    UPDATE join_requests
+    SET
+      status = 'cancelled',
+      updated_at = NOW()
+    WHERE hackathon_id = $1
+      AND user_id = $2
+      AND status = 'pending'
+      AND id <> $3
+    `,
+    [team.hackathon_id, joinReq.user_id, joinReq.id],
+  );
+
+  // If the team just reached max_team_size, automatically expire remaining pending requests for this team
+  if (added.memberCount >= team.max_team_size) {
+    await client.query(
+      `
+      UPDATE join_requests
+      SET
+        status = 'expired',
+        updated_at = NOW()
+      WHERE team_id = $1
+        AND status = 'pending'
+      `,
+      [team.id],
+    );
+  }
+
   await insertAuditLog(client, {
     hackathonId: team.hackathon_id,
     teamId: team.id,
     actorUserId: params.actorUserId,
-    targetUserId: reqRow.user_id,
+    targetUserId: joinReq.user_id,
     action: 'JOIN_REQUEST_ACCEPTED',
     entityType: 'join_request',
-    entityId: reqRow.id,
+    entityId: joinReq.id,
     requestId: params.requestId,
     metadata: {
-      applicantUserId: reqRow.user_id,
-      source: reqRow.source,
-      inviteCodeId: reqRow.invite_code_id,
-      memberCount: membershipOutcome.memberCount,
-      teamStatus: membershipOutcome.status,
+      memberCount: added.memberCount,
+      status: added.status,
     },
   });
 
   await insertOutboxEvent(client, {
     hackathonId: team.hackathon_id,
     teamId: team.id,
-    scope: 'both',
+    scope: 'team',
     eventType: 'JOIN_REQUEST_ACCEPTED',
     payload: {
-      joinRequestId: reqRow.id,
+      joinRequestId: joinReq.id,
       teamId: team.id,
       hackathonId: team.hackathon_id,
-      applicantUserId: reqRow.user_id,
+      acceptedUserId: joinReq.user_id,
       decidedByUserId: params.actorUserId,
-      memberCount: membershipOutcome.memberCount,
-      minTeamSize: team.min_team_size,
-      maxTeamSize: team.max_team_size,
-      status: membershipOutcome.status,
-      isFull: membershipOutcome.memberCount >= team.max_team_size,
+      memberCount: added.memberCount,
+      status: added.status,
     },
   });
 
@@ -470,8 +563,7 @@ export async function acceptJoinRequestTx(
 }
 
 /**
- * Leader declines a pending join request transactionally.
- * Note: declining an invite-sourced join request does NOT restore the invitation's use_count.
+ * Declines a pending join request transactionally.
  */
 export async function declineJoinRequestTx(
   client: PoolClient,
@@ -505,22 +597,22 @@ export async function declineJoinRequestTx(
       created_at,
       updated_at
     FROM join_requests
-    WHERE id = $1 AND team_id = $2
+    WHERE id = $1
     FOR UPDATE
     `,
-    [params.joinRequestId, team.id],
+    [params.joinRequestId],
   );
 
-  const reqRow = reqRes.rows[0];
-  if (!reqRow) {
+  const joinReq = reqRes.rows[0];
+  if (!joinReq || joinReq.team_id !== team.id) {
     throw new AppError(404, 'JOIN_REQUEST_NOT_FOUND', 'Join request not found for this team');
   }
 
-  if (reqRow.status !== 'pending') {
+  if (joinReq.status !== 'pending') {
     throw new AppError(
       409,
       'JOIN_REQUEST_ALREADY_PROCESSED',
-      `Join request has already been ${reqRow.status}`,
+      `Join request has already been ${joinReq.status}`,
     );
   }
 
@@ -547,23 +639,22 @@ export async function declineJoinRequestTx(
       created_at,
       updated_at
     `,
-    [reqRow.id, params.actorUserId],
+    [joinReq.id, params.actorUserId],
   );
+
   const updatedReq = updatedRes.rows[0]!;
 
   await insertAuditLog(client, {
     hackathonId: team.hackathon_id,
     teamId: team.id,
     actorUserId: params.actorUserId,
-    targetUserId: reqRow.user_id,
+    targetUserId: joinReq.user_id,
     action: 'JOIN_REQUEST_DECLINED',
     entityType: 'join_request',
-    entityId: reqRow.id,
+    entityId: joinReq.id,
     requestId: params.requestId,
     metadata: {
-      applicantUserId: reqRow.user_id,
-      source: reqRow.source,
-      inviteCodeId: reqRow.invite_code_id,
+      decidedByUserId: params.actorUserId,
     },
   });
 
@@ -573,10 +664,10 @@ export async function declineJoinRequestTx(
     scope: 'team',
     eventType: 'JOIN_REQUEST_DECLINED',
     payload: {
-      joinRequestId: reqRow.id,
+      joinRequestId: joinReq.id,
       teamId: team.id,
       hackathonId: team.hackathon_id,
-      applicantUserId: reqRow.user_id,
+      applicantUserId: joinReq.user_id,
       decidedByUserId: params.actorUserId,
       status: 'declined',
     },

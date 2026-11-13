@@ -79,7 +79,8 @@ export function TeamCard({ team, onSelectTeam }: TeamCardProps): React.JSX.Eleme
         </div>
 
         <div style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-          <strong>Leader:</strong> {team.leader.displayName} ({team.leader.timezone})
+          <strong>Leader:</strong> {team.leader.displayName} (
+          {team.leader.timezone ?? 'Time zone unconfirmed'})
         </div>
 
         {team.desiredSkills.length > 0 ? (
