@@ -1,6 +1,6 @@
 {
   "name": "@crewmesh/api",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "main": "./dist/server.js",
@@ -16,7 +16,7 @@
     "test:suggestions": "vitest run test/batch5.suggestions.integration.test.ts",
     "test:scale": "vitest run test/scale/scale-seed.integration.test.ts",
     "test:hardening": "vitest run test/batch7.hardening.integration.test.ts",
-    "test:unit": "node --test test/phase1.unit.test.mjs test/batch2.unit.test.mjs test/batch3.unit.test.mjs test/batch4.unit.test.mjs test/batch5.unit.test.mjs test/batch6.unit.test.mjs test/batch7.unit.test.mjs",
+    "test:unit": "node --test test/phase1.unit.test.mjs test/batch2.unit.test.mjs test/batch3.unit.test.mjs test/batch4.unit.test.mjs test/batch5.unit.test.mjs test/batch6.unit.test.mjs test/batch7.unit.test.mjs test/batch8.unit.test.mjs",
     "db:migrate": "tsx src/db/migrate.ts up",
     "db:migrate:down": "tsx src/db/migrate.ts down",
     "db:migrate:status": "tsx src/db/migrate.ts status",

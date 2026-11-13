@@ -111,7 +111,10 @@ export async function resolveHackathonOrThrow(
 }
 
 /**
- * Verifies and locks (`FOR KEY SHARE`) the participant's registration row in `hackathon_participants`.
+ * Verifies and locks (`FOR SHARE`) the participant's registration row in `hackathon_participants`.
+ * - Uses `FOR SHARE` (rather than `FOR KEY SHARE`) because `status` is a non-key column on
+ *   `hackathon_participants`; `FOR SHARE` conflicts with `FOR NO KEY UPDATE` / `FOR UPDATE`,
+ *   serializing membership operations against concurrent `status` changes to `'withdrawn'` or `'disqualified'`.
  * - Rejects accounts that are not registered in the target hackathon (`403 NOT_HACKATHON_PARTICIPANT`).
  * - Rejects participants whose status is `'withdrawn'` or `'disqualified'` (`403 NOT_HACKATHON_PARTICIPANT`).
  * - Never auto-enrolls an unregistered platform account during team mutations.
@@ -126,7 +129,7 @@ export async function requireActiveHackathonParticipantTx(
     SELECT status
     FROM hackathon_participants
     WHERE hackathon_id = $1 AND user_id = $2
-    FOR KEY SHARE
+    FOR SHARE
     `,
     [hackathonId, userId],
   );
@@ -483,7 +486,7 @@ export async function listTeamBoard(
 /**
  * Shared serialized membership engine: adds `candidateUserId` to an already row-locked `team`
  * inside `client` transaction, verifying active participant status in `hackathon_participants`
- * (`FOR KEY SHARE`), verifying capacity from actual `team_members` rows, and enforcing
+ * (`FOR SHARE`), verifying capacity from actual `team_members` rows, and enforcing
  * the unique `(hackathon_id, user_id)` invariant.
  */
 export async function addMemberToLockedTeamTx(

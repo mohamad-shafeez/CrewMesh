@@ -41,7 +41,7 @@ function extractCookieValue(
   return null;
 }
 
-describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant Eligibility & Scale Seeding Suite (PostgreSQL)', () => {
+describe('Batch 6 & 8 — Time-Zone Provenance, Redundant Index Audit, Participant Eligibility & Scale Seeding Suite (PostgreSQL)', () => {
   let app: FastifyInstance;
   let hackathonId: string;
 
@@ -80,16 +80,13 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
 
     const indexNames = new Set(indexRes.rows.map((r) => r.indexname));
 
-    // Redundant non-unique indexes from 004 must be removed
     expect(indexNames.has('idx_team_members_hackathon_user_lookup')).toBe(false);
     expect(indexNames.has('idx_join_requests_team_pending_user_lookup')).toBe(false);
 
-    // Original unique integrity-enforcing indexes must remain intact
     expect(indexNames.has('team_members_one_team_per_hackathon_unique')).toBe(true);
     expect(indexNames.has('idx_join_requests_one_pending_per_team_user')).toBe(true);
     expect(indexNames.has('idx_team_members_one_leader_per_team')).toBe(true);
 
-    // New Batch 6 indexes must exist
     expect(indexNames.has('hackathon_participants_hackathon_user_unique')).toBe(true);
     expect(indexNames.has('idx_teams_hackathon_open_capacity_cursor')).toBe(true);
   });
@@ -98,7 +95,6 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
     const pool = getDbPool();
     const suffix = crypto.randomUUID().slice(0, 8);
 
-    // Register without providing a timezone -> must store timezone = NULL, timezone_confirmed_at = NULL
     const unconfirmedReg = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
@@ -116,7 +112,6 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
     expect(unconfirmedBody.user.timezoneConfirmed).toBe(false);
     expect(unconfirmedBody.user.timezoneConfirmedAt).toBeNull();
 
-    // Verify in PostgreSQL that timezone and timezone_confirmed_at are both NULL
     const dbCheck1 = await pool.query<{ timezone: string | null; timezone_confirmed_at: Date | null }>(
       'SELECT timezone, timezone_confirmed_at FROM users WHERE id = $1',
       [unconfirmedBody.user.id],
@@ -124,7 +119,6 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
     expect(dbCheck1.rows[0]?.timezone).toBeNull();
     expect(dbCheck1.rows[0]?.timezone_confirmed_at).toBeNull();
 
-    // Confirm timezone via PATCH /api/v1/auth/profile -> sets timezone and timezone_confirmed_at
     const rawCookie = extractCookieValue(unconfirmedReg.headers['set-cookie'], 'crewmesh_session');
     const patchRes = await app.inject({
       method: 'PATCH',
@@ -146,9 +140,9 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
   });
 
   it('3. Excludes unrelated platform accounts not registered in hackathon_participants from recommendations', async () => {
+    const pool = getDbPool();
     const suffix = crypto.randomUUID().slice(0, 8);
 
-    // Register a leader enrolled in the active hackathon
     const leaderReg = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
@@ -166,7 +160,7 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
       extractCookieValue(leaderReg.headers['set-cookie'], 'crewmesh_session')!,
     )}`;
 
-    // Register an unrelated platform account with enrollInActiveHackathon = false
+    // Create an unrelated platform account and remove its hackathon_participants record via test DB setup
     const unrelatedReg = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/register',
@@ -177,12 +171,14 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
         displayName: 'Unrelated Platform User',
         skills: ['solidity', 'wasm'],
         timezone: 'Asia/Kolkata',
-        enrollInActiveHackathon: false,
       },
     });
     const unrelatedUserId = unrelatedReg.json<AuthSessionResponse>().user.id;
+    await pool.query(
+      'DELETE FROM hackathon_participants WHERE hackathon_id = $1 AND user_id = $2',
+      [hackathonId, unrelatedUserId],
+    );
 
-    // Leader creates a team desiring 'solidity, wasm'
     const createTeamRes = await app.inject({
       method: 'POST',
       url: `/api/v1/hackathons/${hackathonId}/teams`,
@@ -209,7 +205,6 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
     expect(sugRes.statusCode).toBe(200);
     const sugBody = sugRes.json<TeammateSuggestionsResponseDto>();
 
-    // Unrelated user must NOT appear in suggestions
     expect(sugBody.candidates.map((c) => c.userId)).not.toContain(unrelatedUserId);
     expect(sugBody.diagnostics.timezoneEvidence.teamMembersCount).toBe(1);
     expect(sugBody.diagnostics.timezoneEvidence.confirmedTeamMembersCount).toBe(1);
@@ -250,7 +245,6 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
     const currentDbName = dbNameRes.rows[0]?.db_name ?? '';
 
     if (!currentDbName.endsWith('_loadtest')) {
-      // Safety guard verified in test #4; full 10k/2k seed executes only on *_loadtest DB
       return;
     }
 
@@ -259,6 +253,8 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
     expect(firstRun.afterCounts.participantsCount).toBe(SCALE_TOTAL_PARTICIPANTS);
     expect(firstRun.afterCounts.hackathonEligibleParticipantsCount).toBe(SCALE_TOTAL_PARTICIPANTS);
     expect(firstRun.afterCounts.teamsCount).toBe(SCALE_TOTAL_TEAMS);
+    expect(firstRun.afterCounts.distinctTeamIdsCount).toBe(SCALE_TOTAL_TEAMS);
+    expect(firstRun.afterCounts.leadersCount).toBe(SCALE_TOTAL_TEAMS);
     expect(firstRun.afterCounts.membershipsCount).toBe(SCALE_TOTAL_MEMBERSHIPS);
     expect(firstRun.afterCounts.unassignedParticipantsCount).toBe(SCALE_UNASSIGNED_PARTICIPANTS);
     expect(firstRun.afterCounts.teamSizeDistribution).toEqual({
@@ -273,18 +269,18 @@ describe('Batch 6 — Time-Zone Provenance, Redundant Index Audit, Participant E
     expect(firstRun.afterCounts.incorrectLeaderCountTeamsCount).toBe(0);
     expect(firstRun.afterCounts.duplicateTeamMembershipUsersCount).toBe(0);
 
-    // Run seeder a second time to prove idempotency
     const secondRun = await seedScaleDataset(pool, { writeReportsToDisk: false });
     expect(secondRun.afterCounts).toEqual(
       expect.objectContaining({
         participantsCount: SCALE_TOTAL_PARTICIPANTS,
         teamsCount: SCALE_TOTAL_TEAMS,
+        distinctTeamIdsCount: SCALE_TOTAL_TEAMS,
+        leadersCount: SCALE_TOTAL_TEAMS,
         membershipsCount: SCALE_TOTAL_MEMBERSHIPS,
         unassignedParticipantsCount: SCALE_UNASSIGNED_PARTICIPANTS,
       }),
     );
 
-    // Verify board endpoint returns hydrated pages over the 2,000 teams
     const boardPage1 = await app.inject({
       method: 'GET',
       url: `/api/v1/hackathons/${hackathonId}/teams?limit=20`,

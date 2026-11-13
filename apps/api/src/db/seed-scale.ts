@@ -95,6 +95,8 @@ export interface ScaleDatabaseCountsSnapshot {
   participantsCount: number;
   hackathonEligibleParticipantsCount: number;
   teamsCount: number;
+  distinctTeamIdsCount: number;
+  leadersCount: number;
   membershipsCount: number;
   teamSizeDistribution: Record<string, number>;
   unassignedParticipantsCount: number;
@@ -213,8 +215,6 @@ export function buildDeterministicScaleDataset(hackathonId: string): {
       }
     }
 
-    // Build desired_skills: 2 covered skills from leader + 2 unmet skills not in memberSkillsUnion
-    // so recommendation queries against open-capacity teams always have realistic unmet desired skills.
     const desiredSkills: string[] = [];
     for (const sk of leader.skills.slice(0, 2)) {
       if (!desiredSkills.includes(sk)) {
@@ -280,7 +280,7 @@ export async function assertScaleSeedSafetyGuards(
 }
 
 /**
- * Executes the 11 required SQL count and integrity queries from Section 14.5 of Batch 06.
+ * Executes the SQL count and integrity queries from Section 8.1 of Batch 08 against PostgreSQL.
  */
 export async function queryScaleDatabaseCounts(
   db: Pool | PoolClient,
@@ -291,6 +291,8 @@ export async function queryScaleDatabaseCounts(
     participantsRes,
     eligibleRes,
     teamsRes,
+    distinctTeamsRes,
+    leadersRes,
     membershipsRes,
     sizeDistRes,
     unassignedRes,
@@ -315,6 +317,14 @@ export async function queryScaleDatabaseCounts(
     ),
     db.query<{ cnt: number }>(
       'SELECT COUNT(*)::int AS cnt FROM teams WHERE hackathon_id = $1',
+      [hackathonId],
+    ),
+    db.query<{ cnt: number }>(
+      'SELECT COUNT(DISTINCT id)::int AS cnt FROM teams WHERE hackathon_id = $1',
+      [hackathonId],
+    ),
+    db.query<{ cnt: number }>(
+      "SELECT COUNT(*)::int AS cnt FROM team_members WHERE hackathon_id = $1 AND role = 'leader'",
       [hackathonId],
     ),
     db.query<{ cnt: number }>(
@@ -400,6 +410,8 @@ export async function queryScaleDatabaseCounts(
     participantsCount: participantsRes.rows[0]?.cnt ?? 0,
     hackathonEligibleParticipantsCount: eligibleRes.rows[0]?.cnt ?? 0,
     teamsCount: teamsRes.rows[0]?.cnt ?? 0,
+    distinctTeamIdsCount: distinctTeamsRes.rows[0]?.cnt ?? 0,
+    leadersCount: leadersRes.rows[0]?.cnt ?? 0,
     membershipsCount: membershipsRes.rows[0]?.cnt ?? 0,
     teamSizeDistribution: distribution,
     unassignedParticipantsCount: unassignedRes.rows[0]?.cnt ?? 0,
@@ -409,6 +421,36 @@ export async function queryScaleDatabaseCounts(
     incorrectLeaderCountTeamsCount: badLeaderRes.rows[0]?.cnt ?? 0,
     duplicateTeamMembershipUsersCount: dupMembershipRes.rows[0]?.cnt ?? 0,
   };
+}
+
+/**
+ * Validates that a PostgreSQL `ScaleDatabaseCountsSnapshot` satisfies all exact
+ * Batch 08 Section 8.1 invariants (including 500 teams for each size 2, 3, 4, and 5).
+ */
+export function assertExactScaleCountsSnapshot(counts: ScaleDatabaseCountsSnapshot): void {
+  if (
+    counts.participantsCount !== SCALE_TOTAL_PARTICIPANTS ||
+    counts.hackathonEligibleParticipantsCount !== SCALE_TOTAL_PARTICIPANTS ||
+    counts.teamsCount !== SCALE_TOTAL_TEAMS ||
+    counts.distinctTeamIdsCount !== SCALE_TOTAL_TEAMS ||
+    counts.leadersCount !== SCALE_TOTAL_TEAMS ||
+    counts.membershipsCount !== SCALE_TOTAL_MEMBERSHIPS ||
+    counts.unassignedParticipantsCount !== SCALE_UNASSIGNED_PARTICIPANTS ||
+    counts.teamSizeDistribution['2'] !== 500 ||
+    counts.teamSizeDistribution['3'] !== 500 ||
+    counts.teamSizeDistribution['4'] !== 500 ||
+    counts.teamSizeDistribution['5'] !== 500 ||
+    Object.keys(counts.teamSizeDistribution).length !== 4 ||
+    counts.fullTeamsCount !== 500 ||
+    counts.openCapacityTeamsCount !== 1500 ||
+    counts.incorrectMemberCounterTeamsCount !== 0 ||
+    counts.incorrectLeaderCountTeamsCount !== 0 ||
+    counts.duplicateTeamMembershipUsersCount !== 0
+  ) {
+    throw new Error(
+      `SCALE_SEED_VERIFICATION_FAILED: Post-seed SQL counts did not match required invariants: ${JSON.stringify(counts)}`,
+    );
+  }
 }
 
 /**
@@ -569,8 +611,6 @@ export async function seedScaleDataset(
   const { participants, teams, memberships } = buildDeterministicScaleDataset(hackathon.id);
 
   await withTransaction(async (client) => {
-    // Defer team/member integrity trigger checks until the end of the transaction
-    // so bulk team and membership upserts are verified atomically at commit time.
     await client.query('SET CONSTRAINTS ALL DEFERRED');
 
     const userBatchSize = 1_000;
@@ -856,29 +896,13 @@ export async function seedScaleDataset(
     }
   }, pool);
 
-  // Update planner statistics so PostgreSQL query plans reflect the freshly seeded 10k/2k tables
   await pool.query('ANALYZE users, hackathon_participants, teams, team_members, join_requests');
 
   const afterCounts = await queryScaleDatabaseCounts(pool, hackathon.id);
   const explainPlans = await captureBoardExplainPlans(pool, hackathon.id);
 
-  // Verify post-seed invariants
-  if (
-    afterCounts.participantsCount !== SCALE_TOTAL_PARTICIPANTS ||
-    afterCounts.hackathonEligibleParticipantsCount !== SCALE_TOTAL_PARTICIPANTS ||
-    afterCounts.teamsCount !== SCALE_TOTAL_TEAMS ||
-    afterCounts.membershipsCount !== SCALE_TOTAL_MEMBERSHIPS ||
-    afterCounts.unassignedParticipantsCount !== SCALE_UNASSIGNED_PARTICIPANTS ||
-    afterCounts.fullTeamsCount !== 500 ||
-    afterCounts.openCapacityTeamsCount !== 1500 ||
-    afterCounts.incorrectMemberCounterTeamsCount !== 0 ||
-    afterCounts.incorrectLeaderCountTeamsCount !== 0 ||
-    afterCounts.duplicateTeamMembershipUsersCount !== 0
-  ) {
-    throw new Error(
-      `SCALE_SEED_VERIFICATION_FAILED: Post-seed SQL counts did not match required invariants: ${JSON.stringify(afterCounts)}`,
-    );
-  }
+  // Strictly assert all exact PostgreSQL counts including 500 teams per size (2, 3, 4, 5)
+  assertExactScaleCountsSnapshot(afterCounts);
 
   if (options?.writeReportsToDisk !== false) {
     const reportsDir = path.resolve(__dirname, '../../../../reports/load-test');

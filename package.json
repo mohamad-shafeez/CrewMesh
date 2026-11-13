@@ -1,6 +1,6 @@
 {
   "name": "crewmesh",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "description": "CrewMesh — Race-proof team formation service for Hack4Hack Crew Hiring Challenge 2026 (PS1)",
   "engines": {
@@ -17,7 +17,7 @@
     "dev:api": "npm run dev --workspace=@crewmesh/api",
     "dev:web": "npm run dev --workspace=@crewmesh/web",
     "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\"",
-    "typecheck": "npm run typecheck --workspace=@crewmesh/shared && npm run typecheck --workspace=@crewmesh/api && npm run typecheck --workspace=@crewmesh/web",
+    "typecheck": "npm run build --workspace=@crewmesh/shared && npm run typecheck --workspace=@crewmesh/shared && npm run typecheck --workspace=@crewmesh/api && npm run typecheck --workspace=@crewmesh/web",
     "test": "npm run test --workspace=@crewmesh/api && npm run test --workspace=@crewmesh/web",
     "test:race": "npm run test:race --workspace=@crewmesh/api",
     "test:sse": "npm run test:sse --workspace=@crewmesh/api",
@@ -25,7 +25,7 @@
     "test:scale": "npm run test:scale --workspace=@crewmesh/api",
     "test:hardening": "npm run test:hardening --workspace=@crewmesh/api",
     "test:e2e": "npm run test:e2e --workspace=@crewmesh/web",
-    "test:unit:sandbox": "node --test apps/api/test/phase1.unit.test.mjs apps/api/test/batch2.unit.test.mjs apps/api/test/batch3.unit.test.mjs apps/api/test/batch4.unit.test.mjs apps/api/test/batch5.unit.test.mjs apps/api/test/batch6.unit.test.mjs apps/api/test/batch7.unit.test.mjs",
+    "test:unit:sandbox": "node --test apps/api/test/phase1.unit.test.mjs apps/api/test/batch2.unit.test.mjs apps/api/test/batch3.unit.test.mjs apps/api/test/batch4.unit.test.mjs apps/api/test/batch5.unit.test.mjs apps/api/test/batch6.unit.test.mjs apps/api/test/batch7.unit.test.mjs apps/api/test/batch8.unit.test.mjs",
     "db:migrate": "npm run db:migrate --workspace=@crewmesh/api",
     "db:migrate:down": "npm run db:migrate:down --workspace=@crewmesh/api",
     "db:seed": "npm run db:seed --workspace=@crewmesh/api",
@@ -34,6 +34,9 @@
     "healthcheck": "node scripts/healthcheck.mjs"
   },
   "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/plugin-transform-modules-commonjs": "^7.24.8",
+    "@babel/preset-typescript": "^7.24.7",
     "@typescript-eslint/eslint-plugin": "^7.18.0",
     "@typescript-eslint/parser": "^7.18.0",
     "eslint": "^8.57.0",

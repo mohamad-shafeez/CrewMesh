@@ -13,7 +13,9 @@ import { resetEnvCache } from '../src/config/env.js';
 import { runMigrationsUp } from '../src/db/migrate.js';
 import { closeDbPool, getDbPool } from '../src/db/pool.js';
 import { seedHackathon } from '../src/db/seed.js';
+import { cleanupExpiredRateLimitBuckets } from '../src/security/rate-limit.js';
 import { insertOutboxEvent } from '../src/services/audit-outbox-service.js';
+import { requireActiveHackathonParticipantTx } from '../src/services/team-service.js';
 
 const TEST_ORIGIN = 'http://localhost:5173';
 
@@ -48,7 +50,6 @@ async function registerTestActor(
   options?: {
     skills?: string[];
     timezone?: string | null;
-    enrollInActiveHackathon?: boolean;
   },
 ): Promise<TestActor> {
   const uniqueSuffix = `${label.toLowerCase().replace(/[^a-z0-9]/g, '')}_${crypto.randomUUID().slice(0, 8)}`;
@@ -63,7 +64,6 @@ async function registerTestActor(
       displayName: `User ${label}`,
       skills: options?.skills ?? ['typescript', 'postgresql'],
       timezone: options?.timezone === undefined ? 'Asia/Kolkata' : options.timezone,
-      enrollInActiveHackathon: options?.enrollInActiveHackathon ?? true,
     },
   });
 
@@ -91,7 +91,7 @@ function authMutationHeaders(actor: TestActor, idempotencyKey?: string): Record<
   };
 }
 
-describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team Race, Participant Eligibility & Trigger Integrity Suite (PostgreSQL)', () => {
+describe('Batches 7 & 8 — Final Backend Reliability, Outbox Commit-Order, FOR SHARE Participant Locking, Registration Integrity & Security Hardening Suite (PostgreSQL)', () => {
   let app: FastifyInstance;
   let hackathonId: string;
 
@@ -135,19 +135,40 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     `);
   }
 
-  it('1. Participant Eligibility (Section 4): blocks unregistered, withdrawn, and disqualified accounts across team creation, join requests, invite redemption, and acceptance', async () => {
+  it('1. Participant Eligibility & Registration Rollback (Batch 8 Sections 3 & 4): blocks invalid/inactive hackathon registration with full rollback, blocks unregistered/withdrawn/disqualified accounts, and enforces FOR SHARE row locks', async () => {
     await cleanDatabase();
     const pool = getDbPool();
 
-    const leader = await registerTestActor(app, 'EligLeader');
-    const unregisteredUser = await registerTestActor(app, 'UnregisteredUser', {
-      enrollInActiveHackathon: false,
+    // 1a. Registration with nonexistent hackathonId must fail (404) and create neither user nor session
+    const badHackEmail = `badhack_${crypto.randomUUID().slice(0, 8)}@example.com`;
+    const badHackRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      headers: { origin: TEST_ORIGIN },
+      payload: {
+        email: badHackEmail,
+        password: 'ValidTestPassword!2026',
+        displayName: 'Bad Hackathon User',
+        hackathonId: 'nonexistent-hackathon-slug',
+      },
     });
+    expect(badHackRes.statusCode).toBe(404);
+    expect(badHackRes.json().error.code).toBe('HACKATHON_NOT_FOUND');
+
+    const checkNoUser = await pool.query('SELECT id FROM users WHERE email = $1', [badHackEmail]);
+    expect(checkNoUser.rowCount).toBe(0);
+
+    const leader = await registerTestActor(app, 'EligLeader');
+    const unregisteredUser = await registerTestActor(app, 'UnregisteredUser');
+    await pool.query(
+      'DELETE FROM hackathon_participants WHERE hackathon_id = $1 AND user_id = $2',
+      [hackathonId, unregisteredUser.userId],
+    );
+
     const withdrawnUser = await registerTestActor(app, 'WithdrawnUser');
     const disqualifiedUser = await registerTestActor(app, 'DisqualifiedUser');
     const lateWithdrawnApplicant = await registerTestActor(app, 'LateWithdrawn');
 
-    // Mark withdrawnUser and disqualifiedUser in PostgreSQL
     await pool.query(
       "UPDATE hackathon_participants SET status = 'withdrawn' WHERE hackathon_id = $1 AND user_id = $2",
       [hackathonId, withdrawnUser.userId],
@@ -157,7 +178,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
       [hackathonId, disqualifiedUser.userId],
     );
 
-    // 1a. Unregistered platform account cannot create a team (403 NOT_HACKATHON_PARTICIPANT)
     const unregCreateRes = await app.inject({
       method: 'POST',
       url: `/api/v1/hackathons/${hackathonId}/teams`,
@@ -167,7 +187,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(unregCreateRes.statusCode).toBe(403);
     expect(unregCreateRes.json().error.code).toBe('NOT_HACKATHON_PARTICIPANT');
 
-    // 1b. Registered leader creates a valid team and a 1-use invite code
     const createRes = await app.inject({
       method: 'POST',
       url: `/api/v1/hackathons/${hackathonId}/teams`,
@@ -186,7 +205,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(inviteRes.statusCode).toBe(201);
     const rawCode = inviteRes.json<{ invite: InviteCodeCreatedDto }>().invite.code;
 
-    // 1c. Withdrawn participant cannot submit a join request (403 NOT_HACKATHON_PARTICIPANT)
     const withdrawnJoinRes = await app.inject({
       method: 'POST',
       url: `/api/v1/teams/${teamId}/join-requests`,
@@ -196,7 +214,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(withdrawnJoinRes.statusCode).toBe(403);
     expect(withdrawnJoinRes.json().error.code).toBe('NOT_HACKATHON_PARTICIPANT');
 
-    // 1d. Disqualified participant cannot redeem an invitation code (403 NOT_HACKATHON_PARTICIPANT)
     const disqRedeemRes = await app.inject({
       method: 'POST',
       url: '/api/v1/invites/redeem',
@@ -206,7 +223,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(disqRedeemRes.statusCode).toBe(403);
     expect(disqRedeemRes.json().error.code).toBe('NOT_HACKATHON_PARTICIPANT');
 
-    // 1e. Eligible applicant redeems the 1-use invite code -> creates pending join request and consumes the 1 use
     const validRedeemRes = await app.inject({
       method: 'POST',
       url: '/api/v1/invites/redeem',
@@ -216,11 +232,42 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(validRedeemRes.statusCode).toBe(201);
     const joinRequestId = validRedeemRes.json<InviteRedeemResultDto>().joinRequest.id;
 
-    // If applicant becomes withdrawn before leader accepts, acceptance is blocked with 403 NOT_HACKATHON_PARTICIPANT
-    await pool.query(
-      "UPDATE hackathon_participants SET status = 'withdrawn' WHERE hackathon_id = $1 AND user_id = $2",
-      [hackathonId, lateWithdrawnApplicant.userId],
-    );
+    // 1b. FOR SHARE Concurrency Scenario B: when membership check holds FOR SHARE lock on hackathon_participants,
+    // a concurrent UPDATE hackathon_participants SET status = 'withdrawn' blocks until the transaction commits/rolls back!
+    const clientLock = await pool.connect();
+    const clientWithdraw = await pool.connect();
+    try {
+      await clientLock.query('BEGIN');
+      await clientWithdraw.query('BEGIN');
+
+      await requireActiveHackathonParticipantTx(
+        clientLock,
+        hackathonId,
+        lateWithdrawnApplicant.userId,
+      );
+
+      let withdrawFinishedWhileLocked = false;
+      const withdrawPromise = clientWithdraw
+        .query(
+          "UPDATE hackathon_participants SET status = 'withdrawn' WHERE hackathon_id = $1 AND user_id = $2",
+          [hackathonId, lateWithdrawnApplicant.userId],
+        )
+        .then(() => {
+          withdrawFinishedWhileLocked = true;
+        });
+
+      await new Promise((r) => setTimeout(r, 80));
+      expect(withdrawFinishedWhileLocked).toBe(false);
+
+      await clientLock.query('COMMIT');
+      await withdrawPromise;
+      await clientWithdraw.query('COMMIT');
+    } finally {
+      clientLock.release();
+      clientWithdraw.release();
+    }
+
+    // Because withdrawal committed, leader acceptance is now rejected with 403 NOT_HACKATHON_PARTICIPANT
     const blockedAcceptRes = await app.inject({
       method: 'POST',
       url: `/api/v1/join-requests/${joinRequestId}/accept`,
@@ -229,7 +276,7 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(blockedAcceptRes.statusCode).toBe(403);
     expect(blockedAcceptRes.json().error.code).toBe('NOT_HACKATHON_PARTICIPANT');
 
-    // Restore applicant status to 'registered' -> leader can now accept the 1-use invite join request cleanly (DEFECT-02 regression proof!)
+    // Restore applicant status to 'registered' -> leader can now accept the 1-use invite join request cleanly
     await pool.query(
       "UPDATE hackathon_participants SET status = 'registered' WHERE hackathon_id = $1 AND user_id = $2",
       [hackathonId, lateWithdrawnApplicant.userId],
@@ -243,9 +290,18 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(okAcceptRes.json().team.memberCount).toBe(2);
   });
 
-  it('2. Outbox Commit-Order Regression Test (Section 5): concurrent transactions serialize outbox IDs in exact commit order so no event is ever skipped', async () => {
+  it('2. Outbox Commit-Order & Migration 007 Explicit ID Protection (Batch 8 Section 5.3): serializes concurrent outbox IDs in commit order and rejects explicit caller-supplied IDs', async () => {
     await cleanDatabase();
     const pool = getDbPool();
+
+    // Verify Migration 007 rejects explicit outbox_events.id insertion
+    await expect(
+      pool.query(
+        `INSERT INTO outbox_events (id, hackathon_id, team_id, scope, event_type, payload)
+         VALUES (999999, $1, NULL, 'board', 'TEAM_CREATED', '{}'::jsonb)`,
+        [hackathonId],
+      ),
+    ).rejects.toThrow(/Explicit outbox_events\.id insertion/);
 
     const clientA = await pool.connect();
     const clientB = await pool.connect();
@@ -254,7 +310,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
       await clientA.query('BEGIN');
       await clientB.query('BEGIN');
 
-      // Transaction A inserts an outbox event FIRST (acquires pg_advisory_xact_lock(842026002)) and remains uncommitted
       const idA = await insertOutboxEvent(clientA, {
         hackathonId,
         teamId: null,
@@ -264,7 +319,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
       });
 
       let bResolvedBeforeACommit = false;
-      // Transaction B attempts to insert an outbox event while Transaction A is still open
       const promiseB = insertOutboxEvent(clientB, {
         hackathonId,
         teamId: null,
@@ -276,20 +330,15 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
         return id;
       });
 
-      // Give PostgreSQL 80ms to confirm Transaction B is blocked on trg_outbox_events_serialize_id
       await new Promise((r) => setTimeout(r, 80));
       expect(bResolvedBeforeACommit).toBe(false);
 
-      // Commit Transaction A first
       await clientA.query('COMMIT');
-
-      // Now Transaction B unblocks, allocates the next sequence ID, and commits
       const idB = await promiseB;
       await clientB.query('COMMIT');
 
       expect(BigInt(idA)).toBeLessThan(BigInt(idB));
 
-      // Verify catch-up query observes both events in exact commit order with zero gaps
       const rows = await pool.query<{ id: string; payload: { marker: string } }>(
         'SELECT id::text AS id, payload FROM outbox_events ORDER BY id ASC',
       );
@@ -300,7 +349,7 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     }
   });
 
-  it('3. Cross-Team Same-Participant Concurrency Race (Section 6.B): when two leaders concurrently accept the same participant into two different teams, exactly one succeeds (200) and the other fails with 409 ALREADY_IN_TEAM', async () => {
+  it('3. Cross-Team Same-Participant Concurrency Race: when two leaders concurrently accept the same participant into two different teams, exactly one succeeds (200) and the other fails with 409 ALREADY_IN_TEAM', async () => {
     await cleanDatabase();
 
     const leader1 = await registerTestActor(app, 'CrossLeader1');
@@ -323,7 +372,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     });
     const team2Id = t2Res.json<TeamDetailResponseDto>().team.id;
 
-    // SharedApplicant submits pending join requests to BOTH Team 1 and Team 2
     const jr1Res = await app.inject({
       method: 'POST',
       url: `/api/v1/teams/${team1Id}/join-requests`,
@@ -340,7 +388,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     });
     const jr2Id = jr2Res.json<{ joinRequest: JoinRequestDto }>().joinRequest.id;
 
-    // Fire both leader acceptances concurrently
     const [acc1, acc2] = await Promise.all([
       app.inject({
         method: 'POST',
@@ -365,7 +412,7 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     expect(memberCountRes.rows[0]?.cnt).toBe(1);
   });
 
-  it('4. Simultaneous Identical Idempotency Requests (Section 6.E): concurrent requests with the same Idempotency-Key execute the mutation once and replay the identical response', async () => {
+  it('4. Simultaneous Identical Idempotency Requests & Email Login Rate Limiting (Batch 8 Section 7)', async () => {
     await cleanDatabase();
     const leader = await registerTestActor(app, 'SimulIdemLeader');
     const sharedKey = `simul_idem_${crypto.randomUUID()}`;
@@ -402,9 +449,34 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
     ];
     expect(replayedFlags).toContain(true);
     expect(replayedFlags).toContain(false);
+
+    // Verify auth_email rate limiting uses SHA-256 hashed bucket_key (never raw email)
+    const pool = getDbPool();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      headers: { origin: TEST_ORIGIN },
+      payload: {
+        email: leader.email,
+        password: 'WrongPassword123!',
+      },
+    });
+
+    const bucketRes = await pool.query<{ bucket_key: string; scope: string }>(
+      "SELECT bucket_key, scope FROM rate_limit_buckets WHERE scope = 'auth_email'",
+    );
+    expect(bucketRes.rowCount).toBe(1);
+    expect(bucketRes.rows[0]?.bucket_key).not.toContain(leader.email);
+
+    // Verify cleanupExpiredRateLimitBuckets deletes only expired rows
+    await pool.query(
+      "INSERT INTO rate_limit_buckets (bucket_key, scope, hits, window_start, expires_at) VALUES ('auth_ip:expired_test', 'auth_ip', 5, NOW() - INTERVAL '2 hours', NOW() - INTERVAL '1 hour')",
+    );
+    const deletedCount = await cleanupExpiredRateLimitBuckets(pool, 50);
+    expect(deletedCount).toBeGreaterThanOrEqual(1);
   });
 
-  it('5. Database Integrity Triggers & Constraints (Section 10): rejects 0 leaders, 2 leaders, wrong leader_user_id, mismatched member_count, over-capacity, and invalid status at commit', async () => {
+  it('5. Database Integrity Triggers & Constraints: rejects 0 leaders, 2 leaders, wrong leader_user_id, mismatched member_count, over-capacity, and invalid status at commit', async () => {
     await cleanDatabase();
     const leader = await registerTestActor(app, 'TrigLeader');
     const member = await registerTestActor(app, 'TrigMember');
@@ -431,12 +503,10 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
 
     const pool = getDbPool();
 
-    // 5a. Corrupting member_count to disagree with COUNT(team_members) must fail at commit
     await expect(
       pool.query('UPDATE teams SET member_count = 4 WHERE id = $1', [teamId]),
     ).rejects.toThrow(/disagrees with actual team_members count/);
 
-    // 5b. Promoting second member to leader without demoting first leader must fail (unique index idx_team_members_one_leader_per_team)
     await expect(
       pool.query("UPDATE team_members SET role = 'leader' WHERE team_id = $1 AND user_id = $2", [
         teamId,
@@ -444,7 +514,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
       ]),
     ).rejects.toThrow();
 
-    // 5c. Demoting sole leader so team has 0 leaders must fail at commit
     await expect(
       pool.query("UPDATE team_members SET role = 'member' WHERE team_id = $1 AND user_id = $2", [
         teamId,
@@ -452,7 +521,6 @@ describe('Batch 7 — Final Backend Reliability, Outbox Commit-Order, Cross-Team
       ]),
     ).rejects.toThrow(/must have exactly 1 leader/);
 
-    // 5d. Setting status = 'forming' when member_count = 2 >= min_team_size = 2 must fail check constraint
     await expect(
       pool.query("UPDATE teams SET status = 'forming' WHERE id = $1", [teamId]),
     ).rejects.toThrow();

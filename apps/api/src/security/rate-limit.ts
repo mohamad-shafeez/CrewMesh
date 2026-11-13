@@ -67,3 +67,30 @@ export async function consumeRateLimitBucket(
     retryAfterSeconds,
   };
 }
+
+/**
+ * Safely deletes expired rate-limit records in a bounded batch using
+ * `FOR UPDATE SKIP LOCKED` so concurrent rate-limit operations and multi-instance
+ * deployments never contend on active or locked rows.
+ */
+export async function cleanupExpiredRateLimitBuckets(
+  pool: Pool = getDbPool(),
+  batchLimit = 200,
+): Promise<number> {
+  const safeBatch = Math.min(Math.max(Math.trunc(batchLimit), 1), 1000);
+  const res = await pool.query(
+    `
+    DELETE FROM rate_limit_buckets
+    WHERE bucket_key IN (
+      SELECT bucket_key
+      FROM rate_limit_buckets
+      WHERE expires_at <= NOW()
+      ORDER BY expires_at ASC
+      LIMIT $1
+      FOR UPDATE SKIP LOCKED
+    )
+    `,
+    [safeBatch],
+  );
+  return res.rowCount ?? 0;
+}

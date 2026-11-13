@@ -1,46 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { createRequire } from 'node:module';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { loadTsModule } from '../../../scripts/ts-loader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-function loadTsModule(tsFilePath, customRequireMap = {}) {
-  const require = createRequire('/usr/share/nodejs/index.js');
-  const babel = require('@babel/core');
-  const rawSource = fs
-    .readFileSync(tsFilePath, 'utf8')
-    .replaceAll('import.meta.url', JSON.stringify(`file://${tsFilePath}`));
-  const transformed = babel.transformSync(rawSource, {
-    filename: tsFilePath,
-    presets: [[require.resolve('@babel/preset-typescript'), { allExtensions: true }]],
-    plugins: [require.resolve('@babel/plugin-transform-modules-commonjs')],
-    configFile: false,
-    babelrc: false,
-  });
-
-  const customRequire = (id) => {
-    if (Object.prototype.hasOwnProperty.call(customRequireMap, id)) {
-      return customRequireMap[id];
-    }
-    return require(id);
-  };
-
-  const mod = { exports: {} };
-  const fn = new Function(
-    'exports',
-    'require',
-    'module',
-    '__filename',
-    '__dirname',
-    transformed.code,
-  );
-  fn(mod.exports, customRequire, mod, tsFilePath, path.dirname(tsFilePath));
-  return mod.exports;
-}
 
 const sharedMod = loadTsModule(path.resolve(__dirname, '../../../packages/shared/src/index.ts'));
 const suggestionMod = loadTsModule(
@@ -61,6 +27,7 @@ const { evaluateTeammateCandidates } = suggestionMod;
 const {
   buildDeterministicScaleDataset,
   assertScaleSeedSafetyGuards,
+  assertExactScaleCountsSnapshot,
   SCALE_TOTAL_PARTICIPANTS,
   SCALE_TOTAL_TEAMS,
   SCALE_TOTAL_MEMBERSHIPS,
@@ -77,7 +44,6 @@ test('1. buildDeterministicScaleDataset generates exact 10,000 participants, 2,0
   assert.equal(dataset.teams.length, SCALE_TOTAL_TEAMS);
   assert.equal(dataset.memberships.length, SCALE_TOTAL_MEMBERSHIPS);
 
-  // Verify email namespace and uniqueness
   const userIds = new Set();
   const emails = new Set();
   for (const p of dataset.participants) {
@@ -91,7 +57,6 @@ test('1. buildDeterministicScaleDataset generates exact 10,000 participants, 2,0
   assert.equal(userIds.size, 10000);
   assert.equal(emails.size, 10000);
 
-  // Verify team size distribution: 500 each of sizes 2, 3, 4, 5
   const sizeDist = { 2: 0, 3: 0, 4: 0, 5: 0 };
   let openTeams = 0;
   let fullTeams = 0;
@@ -137,6 +102,49 @@ test('1. buildDeterministicScaleDataset generates exact 10,000 participants, 2,0
   assert.deepEqual(sizeDist, { 2: 500, 3: 500, 4: 500, 5: 500 });
   assert.equal(fullTeams, 500);
   assert.equal(openTeams, 1500);
+
+  // Verify assertExactScaleCountsSnapshot enforces exact 500 per team size
+  assertExactScaleCountsSnapshot({
+    databaseName: 'crewmesh_loadtest',
+    hackathonId: SAMPLE_HACKATHON_ID,
+    capturedAt: EVAL_WINTER.toISOString(),
+    participantsCount: 10000,
+    hackathonEligibleParticipantsCount: 10000,
+    teamsCount: 2000,
+    distinctTeamIdsCount: 2000,
+    leadersCount: 2000,
+    membershipsCount: 7000,
+    teamSizeDistribution: { 2: 500, 3: 500, 4: 500, 5: 500 },
+    unassignedParticipantsCount: 3000,
+    fullTeamsCount: 500,
+    openCapacityTeamsCount: 1500,
+    incorrectMemberCounterTeamsCount: 0,
+    incorrectLeaderCountTeamsCount: 0,
+    duplicateTeamMembershipUsersCount: 0,
+  });
+
+  assert.throws(
+    () =>
+      assertExactScaleCountsSnapshot({
+        databaseName: 'crewmesh_loadtest',
+        hackathonId: SAMPLE_HACKATHON_ID,
+        capturedAt: EVAL_WINTER.toISOString(),
+        participantsCount: 10000,
+        hackathonEligibleParticipantsCount: 10000,
+        teamsCount: 2000,
+        distinctTeamIdsCount: 2000,
+        leadersCount: 2000,
+        membershipsCount: 7000,
+        teamSizeDistribution: { 2: 499, 3: 501, 4: 500, 5: 500 },
+        unassignedParticipantsCount: 3000,
+        fullTeamsCount: 500,
+        openCapacityTeamsCount: 1500,
+        incorrectMemberCounterTeamsCount: 0,
+        incorrectLeaderCountTeamsCount: 0,
+        duplicateTeamMembershipUsersCount: 0,
+      }),
+    /SCALE_SEED_VERIFICATION_FAILED/,
+  );
 });
 
 test('2. buildDeterministicScaleDataset is 100% deterministic across repeated invocations', () => {
@@ -218,7 +226,7 @@ test('4. evaluateTeammateCandidates refuses to use unconfirmed legacy UTC timezo
       {
         userId: '00000000-0000-4000-8000-000000000002',
         skills: ['typescript'],
-        timezone: 'UTC', // Legacy unconfirmed UTC value must be ignored!
+        timezone: 'UTC',
         timezoneConfirmed: false,
       },
     ],
@@ -234,7 +242,7 @@ test('4. evaluateTeammateCandidates refuses to use unconfirmed legacy UTC timezo
         userId: '00000000-0000-4000-8000-000000000011',
         displayName: 'Unconfirmed Legacy UTC Candidate',
         skills: ['rust'],
-        timezone: 'UTC', // Legacy unconfirmed UTC value must NOT be scored as UTC!
+        timezone: 'UTC',
         timezoneConfirmed: false,
       },
     ],
@@ -256,11 +264,9 @@ test('4. evaluateTeammateCandidates refuses to use unconfirmed legacy UTC timezo
     (c) => c.userId === '00000000-0000-4000-8000-000000000011',
   );
 
-  // Because member #2's unconfirmed UTC was excluded, candConfirmed (Asia/Kolkata) matches member #1 (Asia/Kolkata) at 100%!
   assert.equal(candConfirmed.timezoneScore, 100);
   assert.equal(candConfirmed.overallScore, 100);
 
-  // candUnconfirmed has timezoneConfirmed: false -> timezoneScore must be null, timezone must be null!
   assert.equal(candUnconfirmed.timezone, null);
   assert.equal(candUnconfirmed.timezoneScore, null);
   assert.deepEqual(candUnconfirmed.scoreComponentsUsed, ['skill']);

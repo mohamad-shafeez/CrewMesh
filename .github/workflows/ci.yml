@@ -5,6 +5,7 @@ on:
     branches: ['main', 'master']
   pull_request:
     branches: ['main', 'master']
+  workflow_dispatch:
 
 env:
   NODE_ENV: test
@@ -55,14 +56,20 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies deterministically
-        run: npm ci
+      - name: Install dependencies (npm ci when lockfile exists, else generate and verify lockfile)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
-      - name: Apply PostgreSQL migrations (001 through 006)
+      - name: Apply PostgreSQL migrations (001 through 007)
         run: npm run db:migrate
 
-      - name: Verify migration 006 down and up rollback/reapply idempotency
+      - name: Verify migration 007 and 006 down and up rollback/reapply idempotency
         run: |
+          npm run db:migrate:down
           npm run db:migrate:down
           npm run db:migrate
 
@@ -72,16 +79,16 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
-      - name: Run TypeScript typechecking across all workspaces
+      - name: Run TypeScript typechecking across all workspaces (clean checkout safe)
         run: npm run typecheck
 
       - name: Build shared, API, and Web production bundles
         run: npm run build
 
-      - name: Run isolated unit tests (Batches 1–7)
+      - name: Run isolated unit and invariant tests (Batches 1–8)
         run: npm run test:unit:sandbox
 
-      - name: Run PostgreSQL API, SSE, Suggestions, Scale Safety & Batch 7 Hardening integration suites
+      - name: Run PostgreSQL API, SSE, Suggestions, Scale Safety & Batch 7/8 Hardening integration suites
         run: npm run test:integration --workspace=@crewmesh/api
 
       - name: Run 50-way last-seat concurrency & invite use-limit race proofs
@@ -93,14 +100,14 @@ jobs:
       - name: Install Playwright Chromium browser
         run: npx playwright install --with-deps chromium
 
-      - name: Start API and Web servers and execute Playwright E2E browser tests (Desktop + 360px/390px Mobile)
+      - name: Start API and Web preview servers and execute Playwright E2E browser tests (Desktop + 360px/390px Mobile)
         run: |
           npm run start --workspace=@crewmesh/api &
           API_PID=$!
           npm run preview --workspace=@crewmesh/web &
           WEB_PID=$!
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:3001/ready >/dev/null && curl -sf http://localhost:5173 >/dev/null; then
+            if curl -sf http://localhost:3001/ready >/dev/null && curl -sf http://localhost:5173/ready >/dev/null; then
               break
             fi
             sleep 1
@@ -109,7 +116,7 @@ jobs:
           kill $API_PID $WEB_PID || true
 
   scale-and-k6-benchmark:
-    name: Batch 06/07 — 10k Participants, 2k Teams Scale Seed & 100-VU k6 Board Benchmark (p95 < 200ms)
+    name: Batch 06–08 — 10k Participants, 2k Teams Scale Seed & 100-VU k6 Board Benchmark (p95 < 200ms)
     runs-on: ubuntu-latest
     needs: verify-and-test
     timeout-minutes: 20
@@ -143,10 +150,15 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies deterministically
-        run: npm ci
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
-      - name: Apply PostgreSQL migrations (001 through 006) on isolated crewmesh_loadtest database
+      - name: Apply PostgreSQL migrations (001 through 007) on isolated crewmesh_loadtest database
         run: npm run db:migrate
 
       - name: Seed Hack4Hack 2026 event configuration without invented deadline
@@ -186,6 +198,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crewmesh-batch6-load-test-reports
+          name: crewmesh-batch8-load-test-reports
           path: reports/load-test/
           retention-days: 30

@@ -1,49 +1,11 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import { createRequire } from 'node:module';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { loadTsModule } from '../../../scripts/ts-loader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-/**
- * Dynamically transpiles TypeScript source modules via system @babel/core
- * so `node --test` directly executes the production `packages/shared/src/index.ts`
- * and `apps/api/src/services/suggestion-service.ts` implementations.
- */
-function loadTsModule(tsFilePath, customRequireMap = {}) {
-  const require = createRequire('/usr/share/nodejs/index.js');
-  const babel = require('@babel/core');
-  const rawSource = fs.readFileSync(tsFilePath, 'utf8');
-  const transformed = babel.transformSync(rawSource, {
-    filename: tsFilePath,
-    presets: [[require.resolve('@babel/preset-typescript'), { allExtensions: true }]],
-    plugins: [require.resolve('@babel/plugin-transform-modules-commonjs')],
-    configFile: false,
-    babelrc: false,
-  });
-
-  const customRequire = (id) => {
-    if (Object.prototype.hasOwnProperty.call(customRequireMap, id)) {
-      return customRequireMap[id];
-    }
-    return require(id);
-  };
-
-  const mod = { exports: {} };
-  const fn = new Function(
-    'exports',
-    'require',
-    'module',
-    '__filename',
-    '__dirname',
-    transformed.code,
-  );
-  fn(mod.exports, customRequire, mod, tsFilePath, path.dirname(tsFilePath));
-  return mod.exports;
-}
 
 const sharedMod = loadTsModule(path.resolve(__dirname, '../../../packages/shared/src/index.ts'));
 const suggestionMod = loadTsModule(
@@ -139,9 +101,7 @@ test('4. Partial unmet-skill coverage yields exact proportional score', () => {
   });
 
   const candidate = evaluation.candidates[0];
-  // 2 of 3 unmet desired skills = 66.666... -> rounded to 66.7 for display
   assert.equal(candidate.skillScore, 66.7);
-  // Raw internal calculation: (66.6666667 * 70 + 100 * 30) / 100 = 76.6666667 -> 76.7
   assert.equal(candidate.overallScore, 76.7);
 });
 
@@ -335,7 +295,7 @@ test('11. Opposite-offset candidate (12 hours = 720 minutes apart) receives 0% t
         userId: '00000000-0000-4000-8000-000000000018',
         displayName: 'OppositeTz',
         skills: ['rust'],
-        timezone: 'Etc/GMT-12', // POSIX Etc/GMT-12 is UTC+12 (+720 minutes)
+        timezone: 'Etc/GMT-12',
       },
     ],
     referenceDate: EVAL_WINTER,
@@ -347,11 +307,9 @@ test('11. Opposite-offset candidate (12 hours = 720 minutes apart) receives 0% t
 });
 
 test('12. Circular 24-hour distance handles UTC+12 vs UTC-12 and UTC+14 vs UTC-10 as 0 minutes (100% compatibility)', () => {
-  // +720 (UTC+12) vs -720 (UTC-12): |720 - (-720)| = 1440 -> min(1440, 1440 - 1440) = 0 minutes
   assert.equal(computeCircularOffsetDistanceMinutes(720, -720), 0);
   assert.equal(computePairwiseTimezoneScore(720, -720), 100);
 
-  // +840 (UTC+14, Pacific/Kiritimati) vs -600 (UTC-10, Pacific/Honolulu): |840 - (-600)| = 1440 -> 0 minutes
   const kiritimatiOffset = getIanaUtcOffsetMinutes('Pacific/Kiritimati', EVAL_WINTER);
   const honoluluOffset = getIanaUtcOffsetMinutes('Pacific/Honolulu', EVAL_WINTER);
   assert.equal(kiritimatiOffset, 840);
@@ -373,7 +331,6 @@ test('13. Non-whole-hour offsets (Asia/Kolkata +330m, Asia/Kathmandu +345m, Aust
   assert.equal(diffMin, 15);
 
   const score = computePairwiseTimezoneScore(kolkataOffset, kathmanduOffset);
-  // 100 * (1 - 15 / 720) = 97.916666...
   assert.ok(Math.abs(score - 97.9166666667) < 1e-6);
 });
 
@@ -381,8 +338,8 @@ test('14. DST-aware offset calculation uses the evaluation timestamp rather than
   const nyWinter = getIanaUtcOffsetMinutes('America/New_York', EVAL_WINTER);
   const nySummer = getIanaUtcOffsetMinutes('America/New_York', EVAL_SUMMER);
 
-  assert.equal(nyWinter, -300); // EST: UTC-05:00
-  assert.equal(nySummer, -240); // EDT: UTC-04:00
+  assert.equal(nyWinter, -300);
+  assert.equal(nySummer, -240);
 });
 
 test('15. Tie-breaking order (overallScore DESC, skillScore DESC NULLS LAST, timezoneScore DESC NULLS LAST, userId ASC) is deterministic', () => {
@@ -417,11 +374,6 @@ test('15. Tie-breaking order (overallScore DESC, skillScore DESC NULLS LAST, tim
 });
 
 test('16. Weighted overall score matches the 70 / 30 formula prior to display rounding', () => {
-  // Worked Example from Batch 5 specification:
-  // Team desired: ['typescript', 'postgresql', 'react', 'redis']
-  // Existing member: ['typescript', 'postgresql'] in Asia/Kolkata (+330)
-  // Candidate A: ['react', 'redis', 'docker'] in Asia/Kolkata (+330) -> Skill 100, TZ 100 -> Overall 100.0
-  // Candidate B: ['react'] in Europe/London (+0 in Jan) -> Skill 50, TZ 54.1667 -> Overall (50*70 + 54.1667*30)/100 = 51.25 -> 51.3
   const evaluation = evaluateTeammateCandidates({
     teamDesiredSkills: ['typescript', 'postgresql', 'react', 'redis'],
     existingMembers: [
@@ -461,7 +413,6 @@ test('16. Weighted overall score matches the 70 / 30 formula prior to display ro
 });
 
 test('17. Weight renormalization works when one component is null and excludes unrankable profiles when both are null', () => {
-  // Case 1: Only timezoneScore available (desiredSkills = [])
   const tzOnly = evaluateTeammateCandidates({
     teamDesiredSkills: [],
     existingMembers: [
@@ -485,7 +436,6 @@ test('17. Weight renormalization works when one component is null and excludes u
   assert.equal(tzOnly.candidates[0].timezoneScore, 54.2);
   assert.equal(tzOnly.candidates[0].overallScore, 54.2);
 
-  // Case 2: Both skillScore and timezoneScore are null -> counted in unrankableProfiles
   const bothNull = evaluateTeammateCandidates({
     teamDesiredSkills: [],
     existingMembers: [

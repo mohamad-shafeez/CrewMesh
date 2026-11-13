@@ -1,5 +1,5 @@
 /**
- * CrewMesh — Batch 06 Real Grafana k6 Board Load Test
+ * CrewMesh — Batch 06/08 Real Grafana k6 Board Load Test
  * Target Endpoint: GET /api/v1/hackathons/:hackathonId/teams
  * Dataset: 10,000 persisted participants, 2,000 persisted teams, 7,000 memberships
  * Requirement: 100 concurrent virtual users, 60-second measured run, p95 < 200 ms, failure rate < 1%
@@ -34,6 +34,8 @@ export const options = {
   thresholds: {
     'http_req_duration{scenario:board_load}': ['p(95)<200'],
     'http_req_failed{scenario:board_load}': ['rate<0.01'],
+    'http_reqs{scenario:board_load}': ['count>0'],
+    'http_reqs{scenario:board_warmup}': ['count>0'],
     'checks{scenario:board_load}': ['rate>0.99'],
   },
 };
@@ -128,29 +130,41 @@ export function benchmarkBoard(data) {
 }
 
 export function handleSummary(data) {
-  const m = data.metrics['http_req_duration{scenario:board_load}'] || data.metrics.http_req_duration || {};
-  const vals = m.values || {};
-  const reqs = data.metrics.http_reqs ? data.metrics.http_reqs.values : {};
-  const failed = data.metrics['http_req_failed{scenario:board_load}'] || data.metrics.http_req_failed || {};
-  const failedVals = failed.values || {};
+  const durationMetric = data.metrics['http_req_duration{scenario:board_load}'] || {};
+  const vals = durationMetric.values || {};
+
+  // Strictly read measurement-phase tagged request count and throughput (`scenario:board_load`)
+  const measuredReqsMetric = data.metrics['http_reqs{scenario:board_load}'] || {};
+  const measuredReqsVals = measuredReqsMetric.values || {};
+
+  const warmupReqsMetric = data.metrics['http_reqs{scenario:board_warmup}'] || {};
+  const warmupReqsVals = warmupReqsMetric.values || {};
+
+  const failedMetric = data.metrics['http_req_failed{scenario:board_load}'] || {};
+  const failedVals = failedMetric.values || {};
+
+  const checksMetric = data.metrics['checks{scenario:board_load}'] || {};
+  const checksVals = checksMetric.values || {};
 
   const textLines = [
     '================================================================================',
-    'CrewMesh Batch 06 — Grafana k6 Board Endpoint Benchmark Summary',
+    'CrewMesh Batch 08 — Grafana k6 Board Endpoint Benchmark Summary (Measured Phase)',
     '================================================================================',
-    `Endpoint:          GET ${BASE_URL}/api/v1/hackathons/${HACKATHON_SLUG}/teams`,
-    'Virtual Users:     100 concurrent VUs (constant-vus)',
-    'Measured Duration: 60s (following 10s warmup)',
-    `Total Requests:    ${reqs.count ?? 'N/A'}`,
-    `Throughput (RPS):  ${typeof reqs.rate === 'number' ? reqs.rate.toFixed(2) : 'N/A'} req/s`,
-    `Average Latency:   ${typeof vals.avg === 'number' ? vals.avg.toFixed(2) : 'N/A'} ms`,
-    `p50 Latency:       ${typeof vals['p(50)'] === 'number' ? vals['p(50)'].toFixed(2) : 'N/A'} ms`,
-    `p90 Latency:       ${typeof vals['p(90)'] === 'number' ? vals['p(90)'].toFixed(2) : 'N/A'} ms`,
-    `p95 Latency:       ${typeof vals['p(95)'] === 'number' ? vals['p(95)'].toFixed(2) : 'N/A'} ms`,
-    `p99 Latency:       ${typeof vals['p(99)'] === 'number' ? vals['p(99)'].toFixed(2) : 'N/A'} ms`,
-    `Max Latency:       ${typeof vals.max === 'number' ? vals.max.toFixed(2) : 'N/A'} ms`,
-    `Failed Rate:       ${typeof failedVals.rate === 'number' ? (failedVals.rate * 100).toFixed(4) : 'N/A'}%`,
-    `Threshold p95<200: ${typeof vals['p(95)'] === 'number' && vals['p(95)'] < 200 ? 'PASS' : 'FAIL'}`,
+    `Endpoint:               GET ${BASE_URL}/api/v1/hackathons/${HACKATHON_SLUG}/teams`,
+    'Virtual Users:          100 concurrent VUs (constant-vus, scenario:board_load)',
+    'Measured Duration:      60s (excluding 10s board_warmup phase)',
+    `Warm-up Requests:       ${warmupReqsVals.count ?? 'N/A'}`,
+    `Measured Requests:      ${measuredReqsVals.count ?? 'N/A'}`,
+    `Measured Throughput:    ${typeof measuredReqsVals.rate === 'number' ? measuredReqsVals.rate.toFixed(2) : 'N/A'} req/s`,
+    `Measured Checks Pass:   ${typeof checksVals.rate === 'number' ? (checksVals.rate * 100).toFixed(2) : 'N/A'}%`,
+    `Average Latency:        ${typeof vals.avg === 'number' ? vals.avg.toFixed(2) : 'N/A'} ms`,
+    `p50 Latency:            ${typeof vals['p(50)'] === 'number' ? vals['p(50)'].toFixed(2) : 'N/A'} ms`,
+    `p90 Latency:            ${typeof vals['p(90)'] === 'number' ? vals['p(90)'].toFixed(2) : 'N/A'} ms`,
+    `p95 Latency:            ${typeof vals['p(95)'] === 'number' ? vals['p(95)'].toFixed(2) : 'N/A'} ms`,
+    `p99 Latency:            ${typeof vals['p(99)'] === 'number' ? vals['p(99)'].toFixed(2) : 'N/A'} ms`,
+    `Max Latency:            ${typeof vals.max === 'number' ? vals.max.toFixed(2) : 'N/A'} ms`,
+    `Measured Failed Rate:   ${typeof failedVals.rate === 'number' ? (failedVals.rate * 100).toFixed(4) : 'N/A'}%`,
+    `Threshold p95 < 200ms:  ${typeof vals['p(95)'] === 'number' && vals['p(95)'] < 200 ? 'PASS' : 'FAIL'}`,
     '================================================================================',
     '',
   ].join('\n');

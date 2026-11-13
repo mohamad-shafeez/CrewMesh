@@ -4,6 +4,7 @@ import {
   isValidIanaTimeZone,
   normalizeEmail,
   normalizeSkillTags,
+  type HackathonParticipantStatus,
   type PublicUserProfile,
 } from '@crewmesh/shared';
 import { getEnv } from '../config/env.js';
@@ -21,7 +22,11 @@ import {
   sha256Hex,
   verifyPassword,
 } from '../security/crypto.js';
-import { consumeRateLimitBucket } from '../security/rate-limit.js';
+import {
+  cleanupExpiredRateLimitBuckets,
+  consumeRateLimitBucket,
+} from '../security/rate-limit.js';
+import { resolveHackathonOrThrow } from '../services/team-service.js';
 
 const optionalTimezoneSchema = z
   .union([z.string(), z.null(), z.undefined()])
@@ -57,7 +62,6 @@ const registerBodySchema = z.object({
   timezone: optionalTimezoneSchema.optional().default(null),
   bio: z.string().trim().max(500).optional().default(''),
   hackathonId: z.string().trim().min(2).max(64).optional(),
-  enrollInActiveHackathon: z.boolean().optional().default(true),
 });
 
 const loginBodySchema = z.object({
@@ -113,15 +117,18 @@ function mapUserToPublicProfile(row: UserRow): PublicUserProfile {
 export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
   /**
    * POST /api/v1/auth/register
-   * Normalizes email, hashes password with Argon2id, records explicit timezone confirmation
-   * provenance ONLY when the participant provides a valid IANA time zone (never fabricating UTC),
-   * enrolls the participant in the active hackathon when requested, and creates the session transactionally.
+   * Transactionally resolves the active target hackathon (using `body.hackathonId` or
+   * the configured `env.HACKATHON_SLUG`, verifying active state and optional deadline),
+   * creates the `users` record, inserts the verified `hackathon_participants` record,
+   * and issues the session in a single atomic transaction.
+   * Public callers cannot bypass hackathon participant enrollment.
    */
   app.post('/api/v1/auth/register', async (request, reply) => {
     const env = getEnv();
     const body = registerBodySchema.parse(request.body);
     const normalizedSkills = normalizeSkillTags(body.skills);
     const explicitTimezone = body.timezone ?? null;
+    const targetHackathonIdOrSlug = body.hackathonId ?? env.HACKATHON_SLUG;
 
     // Rate limit registration attempts by IP
     const ipLimit = await consumeRateLimitBucket({
@@ -148,6 +155,12 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const result = await withTransaction(async (client) => {
+        // 1. Resolve and validate target hackathon BEFORE creating the user account
+        const hackathon = await resolveHackathonOrThrow(targetHackathonIdOrSlug, client, {
+          requireRegistrationOpen: true,
+        });
+
+        // 2. Insert user row with explicit timezone confirmation provenance
         const userRes = await client.query<UserRow>(
           `
           INSERT INTO users (
@@ -195,36 +208,31 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
           throw new Error('Failed to insert user row');
         }
 
-        // Enroll in hackathon_participants when enrollInActiveHackathon is true (default)
-        if (body.enrollInActiveHackathon !== false) {
-          if (body.hackathonId) {
-            await client.query(
-              `
-              INSERT INTO hackathon_participants (hackathon_id, user_id, status)
-              SELECT id, $2, 'registered'
-              FROM hackathons
-              WHERE id::text = $1 OR slug = $1
-              LIMIT 1
-              ON CONFLICT (hackathon_id, user_id) DO NOTHING
-              `,
-              [body.hackathonId, userRow.id],
-            );
-          } else {
-            await client.query(
-              `
-              INSERT INTO hackathon_participants (hackathon_id, user_id, status)
-              SELECT id, $1, 'registered'
-              FROM hackathons
-              WHERE is_active = TRUE
-              ORDER BY created_at ASC
-              LIMIT 1
-              ON CONFLICT (hackathon_id, user_id) DO NOTHING
-              `,
-              [userRow.id],
-            );
-          }
+        // 3. Insert and verify hackathon_participants registration row
+        const partRes = await client.query<{
+          id: string;
+          status: HackathonParticipantStatus;
+        }>(
+          `
+          INSERT INTO hackathon_participants (hackathon_id, user_id, status)
+          VALUES ($1, $2, 'registered')
+          ON CONFLICT (hackathon_id, user_id) DO UPDATE SET
+            status = hackathon_participants.status
+          RETURNING id, status
+          `,
+          [hackathon.id, userRow.id],
+        );
+
+        const partRow = partRes.rows[0];
+        if (!partRow || partRow.status !== 'registered') {
+          throw new AppError(
+            403,
+            'NOT_HACKATHON_PARTICIPANT',
+            'Unable to register participant in this hackathon',
+          );
         }
 
+        // 4. Create initial session row
         const sessionRes = await client.query<{ expires_at: Date }>(
           `
           INSERT INTO sessions (user_id, token_hash, csrf_token_hash, ip_address, user_agent, expires_at)
@@ -282,25 +290,51 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
   /**
    * POST /api/v1/auth/login
-   * Verifies Argon2id password, revokes any prior session token on the request (session rotation),
-   * and issues a fresh session cookie + CSRF token.
+   * Enforces both IP-based (`auth_ip`) and privacy-preserving SHA-256 email-based (`auth_email`)
+   * rate limiting before Argon2id verification, revokes any prior session token on the request
+   * (session rotation), and issues a fresh session cookie + CSRF token.
    */
   app.post('/api/v1/auth/login', async (request, reply) => {
     const env = getEnv();
     const body = loginBodySchema.parse(request.body);
+    const pool = getDbPool();
 
-    const ipLimit = await consumeRateLimitBucket({
-      scope: 'auth_ip',
-      identifier: `login:${request.ip}`,
-      limit: 15,
-      windowSeconds: 60,
-    });
-    if (!ipLimit.allowed) {
-      reply.header('Retry-After', String(ipLimit.retryAfterSeconds));
+    // Hash the normalized email so raw email addresses are never stored in rate_limit_buckets
+    const emailBucketDigest = sha256Hex(`login_email:${body.email}`);
+
+    const [ipLimit, emailLimit] = await Promise.all([
+      consumeRateLimitBucket(
+        {
+          scope: 'auth_ip',
+          identifier: `login:${request.ip}`,
+          limit: 15,
+          windowSeconds: 60,
+        },
+        pool,
+      ),
+      consumeRateLimitBucket(
+        {
+          scope: 'auth_email',
+          identifier: emailBucketDigest,
+          limit: 10,
+          windowSeconds: 60,
+        },
+        pool,
+      ),
+    ]);
+
+    if (!ipLimit.allowed || !emailLimit.allowed) {
+      const retryAfter = Math.max(
+        ipLimit.allowed ? 0 : ipLimit.retryAfterSeconds,
+        emailLimit.allowed ? 0 : emailLimit.retryAfterSeconds,
+      );
+      reply.header('Retry-After', String(retryAfter));
       throw new AppError(429, 'RATE_LIMITED', 'Too many login attempts. Please try again later.');
     }
 
-    const pool = getDbPool();
+    //Opportunistically prune expired rate-limit buckets in bounded non-blocking batches
+    void cleanupExpiredRateLimitBuckets(pool, 100).catch(() => undefined);
+
     const userRes = await pool.query<UserRow>(
       `
       SELECT

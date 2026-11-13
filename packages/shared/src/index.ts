@@ -349,7 +349,6 @@ export interface RegisterRequestDto {
   timezone?: string | null;
   bio?: string;
   hackathonId?: string;
-  enrollInActiveHackathon?: boolean;
 }
 
 export interface LoginRequestDto {

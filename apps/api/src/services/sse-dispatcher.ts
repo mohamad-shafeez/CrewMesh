@@ -22,8 +22,126 @@ const LEADER_ONLY_TEAM_EVENTS = new Set<OutboxEventType>([
   'INVITE_REVOKED',
 ]);
 
+const LEADER_ONLY_EVENT_TYPES_ARRAY: OutboxEventType[] = [
+  'JOIN_REQUEST_CREATED',
+  'JOIN_REQUEST_DECLINED',
+  'INVITE_CREATED',
+  'INVITE_REVOKED',
+];
+
+const TEAM_EVENT_ALLOWED_KEYS: Record<OutboxEventType, readonly string[]> = {
+  TEAM_CREATED: [
+    'teamId',
+    'hackathonId',
+    'name',
+    'leaderUserId',
+    'status',
+    'memberCount',
+    'minTeamSize',
+    'maxTeamSize',
+    'isFull',
+  ],
+  TEAM_UPDATED: [
+    'teamId',
+    'hackathonId',
+    'status',
+    'memberCount',
+    'minTeamSize',
+    'maxTeamSize',
+    'isFull',
+  ],
+  TEAM_PREFERENCES_UPDATED: [
+    'teamId',
+    'hackathonId',
+    'desiredSkills',
+    'lookingForMembers',
+    'memberCount',
+    'minTeamSize',
+    'maxTeamSize',
+    'status',
+    'isFull',
+  ],
+  TEAM_DELETED: ['teamId', 'hackathonId', 'actorUserId', 'reason'],
+  JOIN_REQUEST_CREATED: [
+    'joinRequestId',
+    'teamId',
+    'hackathonId',
+    'applicantUserId',
+    'source',
+    'status',
+  ],
+  JOIN_REQUEST_ACCEPTED: [
+    'joinRequestId',
+    'teamId',
+    'hackathonId',
+    'acceptedUserId',
+    'decidedByUserId',
+    'memberCount',
+    'status',
+  ],
+  JOIN_REQUEST_DECLINED: [
+    'joinRequestId',
+    'teamId',
+    'hackathonId',
+    'applicantUserId',
+    'decidedByUserId',
+    'status',
+  ],
+  INVITE_CREATED: [
+    'inviteId',
+    'teamId',
+    'hackathonId',
+    'tokenPrefix',
+    'maxUses',
+    'expiresAt',
+  ],
+  INVITE_REVOKED: ['inviteId', 'teamId', 'hackathonId', 'revokedAt'],
+  MEMBER_JOINED: [
+    'teamId',
+    'hackathonId',
+    'userId',
+    'memberCount',
+    'minTeamSize',
+    'maxTeamSize',
+    'status',
+    'isFull',
+  ],
+  MEMBER_REMOVED: [
+    'teamId',
+    'hackathonId',
+    'removedUserId',
+    'memberCount',
+    'minTeamSize',
+    'maxTeamSize',
+    'status',
+    'isFull',
+  ],
+  MEMBER_LEFT: [
+    'teamId',
+    'hackathonId',
+    'departedUserId',
+    'memberCount',
+    'minTeamSize',
+    'maxTeamSize',
+    'status',
+    'isFull',
+  ],
+  LEADER_SUCCESSION: [
+    'teamId',
+    'hackathonId',
+    'previousLeaderUserId',
+    'newLeaderUserId',
+    'memberCount',
+    'minTeamSize',
+    'maxTeamSize',
+    'status',
+    'isFull',
+  ],
+};
+
 const MAX_SSE_SUBSCRIBERS = 500;
 const MAX_SUBSCRIBER_QUEUED_FRAMES = 256;
+const REPLAY_PAGE_BATCH_SIZE = 250;
 
 export interface OutboxEventRow {
   id: string;
@@ -43,6 +161,7 @@ export interface BoardSseSubscriber {
   lastSentEventId: bigint;
   closed: boolean;
   queuedFrames: number;
+  needsCatchup?: boolean;
 }
 
 export interface TeamSseSubscriber {
@@ -56,6 +175,7 @@ export interface TeamSseSubscriber {
   lastSentEventId: bigint;
   closed: boolean;
   queuedFrames: number;
+  needsCatchup?: boolean;
 }
 
 export type SseSubscriber = BoardSseSubscriber | TeamSseSubscriber;
@@ -116,7 +236,8 @@ export function projectPublicBoardSseEvent(
 
 /**
  * Projects a committed outbox row into an authorized team SSE event payload
- * filtered by the member's current role ('leader' vs 'member').
+ * filtered by the member's current role ('leader' vs 'member') and restricted
+ * to the explicit allowlisted fields for `row.event_type` after recursive sanitization.
  */
 export function projectTeamStreamSseEvent(
   row: OutboxEventRow,
@@ -132,9 +253,15 @@ export function projectTeamStreamSseEvent(
     return null;
   }
 
-  const safeData = sanitizeEventMetadata(row.payload ?? {});
-  // Strip any accidental email field even if present in payload
-  delete safeData.email;
+  const recursivelySanitized = sanitizeEventMetadata(row.payload ?? {});
+  const allowedKeys = TEAM_EVENT_ALLOWED_KEYS[row.event_type] ?? [];
+  const allowlistedData: Record<string, unknown> = {};
+
+  for (const key of allowedKeys) {
+    if (Object.prototype.hasOwnProperty.call(recursivelySanitized, key)) {
+      allowlistedData[key] = recursivelySanitized[key];
+    }
+  }
 
   const createdAt =
     row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at);
@@ -144,7 +271,7 @@ export function projectTeamStreamSseEvent(
     eventType: row.event_type,
     hackathonId: row.hackathon_id,
     teamId: row.team_id,
-    data: safeData,
+    data: allowlistedData,
     createdAt,
   };
 }
@@ -162,22 +289,26 @@ export function formatSseFrame(params: {
 
 /**
  * Shared durable outbox SSE dispatcher.
- * Uses a single PostgreSQL LISTEN connection for low-latency wake-ups and falls back to
- * durable `outbox_events` polling so missed notifications or listener disconnects
- * never lose committed events.
  *
- * Commit-order guarantee (Migration 006):
- * `trg_outbox_events_serialize_id` acquires `pg_advisory_xact_lock(842026002)` before
- * allocating `outbox_events.id`, ensuring sequence allocation order strictly equals
- * transaction commit visibility order.
+ * Synchronization & Replay Guarantees (Batch 08):
+ * 1. `registerSubscriber` and `drainNewOutboxEvents` are serialized through `this.runExclusive(...)`
+ *    so no outbox event can commit and be drained between watermark capture, paginated replay,
+ *    and adding the subscriber to `this.subscribers`.
+ * 2. `replayEventsForSubscriber` uses cursor-paginated batches (`REPLAY_PAGE_BATCH_SIZE = 250`)
+ *    with SQL-level role filtering so `> 500` missed events or `> 500` leader-only events never
+ *    truncate history or starve regular team members.
+ * 3. Per-subscriber delivery errors during live draining are isolated per subscriber and flag
+ *    `subscriber.needsCatchup = true` without advancing `subscriber.lastSentEventId`, allowing
+ *    automatic catch-up on the next drain cycle without blocking other subscribers.
  */
 export class OutboxSseDispatcher {
   private readonly pool: Pool;
   private readonly subscribers = new Map<string, SseSubscriber>();
   private listenClient: pg.Client | null = null;
   private lastDispatchedId: bigint = 0n;
-  private draining = false;
+  private exclusiveChain: Promise<void> = Promise.resolve();
   private drainRequested = false;
+  private draining = false;
   private pollTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -190,6 +321,19 @@ export class OutboxSseDispatcher {
 
   public getSubscriberCount(): number {
     return this.subscribers.size;
+  }
+
+  /**
+   * Serializes subscriber registration and outbox drain cycles so watermark capture,
+   * replay, and live map insertion form a single atomic logical operation.
+   */
+  private runExclusive<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.exclusiveChain.then(task, task);
+    this.exclusiveChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
   public async start(): Promise<void> {
@@ -256,7 +400,6 @@ export class OutboxSseDispatcher {
       await client.connect();
       await client.query('LISTEN crewmesh_outbox');
       this.listenClient = client;
-      // Drain any events committed while the listener was connecting
       void this.requestDrain();
     } catch {
       try {
@@ -291,10 +434,6 @@ export class OutboxSseDispatcher {
     this.reconnectTimer.unref?.();
   }
 
-  /**
-   * Simulates a PostgreSQL listener connection drop in integration tests to verify
-   * automatic listener reconnection and durable outbox catch-up recovery.
-   */
   public async simulateListenerInterruptionForTest(): Promise<void> {
     if (this.listenClient) {
       const active = this.listenClient;
@@ -305,8 +444,13 @@ export class OutboxSseDispatcher {
   }
 
   /**
-   * Registers a subscriber, replays missed events since `lastEventId` from PostgreSQL,
-   * and attaches close cleanup handlers.
+   * Registers a subscriber atomically relative to dispatcher draining:
+   * 1. Acquires `runExclusive` lock and drains any pending committed events so
+   *    `this.lastDispatchedId` equals the exact current watermark.
+   * 2. Replays all events in `(replaySinceEventId, watermarkId]` using cursor-based
+   *    keyset pagination (`REPLAY_PAGE_BATCH_SIZE = 250`) with SQL role filtering.
+   * 3. Sets `subscriber.lastSentEventId = watermarkId` and inserts the subscriber
+   *    into `this.subscribers` before releasing `runExclusive`.
    */
   public async registerSubscriber(
     subscriber: SseSubscriber,
@@ -318,81 +462,165 @@ export class OutboxSseDispatcher {
 
     await this.start();
 
-    // Capture current max outbox ID before replay so we know the live watermark
-    const watermarkRes = await this.pool.query<{ max_id: string | null }>(
-      'SELECT MAX(id)::text AS max_id FROM outbox_events',
-    );
-    const currentMaxId = watermarkRes.rows[0]?.max_id
-      ? BigInt(watermarkRes.rows[0]!.max_id!)
-      : 0n;
-
-    if (replaySinceEventId !== null) {
-      subscriber.lastSentEventId = replaySinceEventId;
-      await this.replayEventsForSubscriber(subscriber, replaySinceEventId, currentMaxId);
-    } else {
-      subscriber.lastSentEventId = currentMaxId;
-    }
-
-    if (subscriber.closed) {
-      return;
-    }
-
-    this.subscribers.set(subscriber.id, subscriber);
-
     subscriber.res.on('close', () => {
       this.closeSubscriber(subscriber.id);
     });
     subscriber.res.on('error', () => {
       this.closeSubscriber(subscriber.id);
     });
+
+    await this.runExclusive(async () => {
+      if (subscriber.closed || this.shuttingDown) {
+        return;
+      }
+
+      // First drain any newly committed outbox rows so existing subscribers and
+      // `this.lastDispatchedId` are brought up to the current PostgreSQL watermark
+      await this.drainNewOutboxEventsInternal();
+
+      const watermarkRes = await this.pool.query<{ max_id: string | null }>(
+        'SELECT MAX(id)::text AS max_id FROM outbox_events',
+      );
+      const currentMaxId = watermarkRes.rows[0]?.max_id
+        ? BigInt(watermarkRes.rows[0]!.max_id!)
+        : 0n;
+      const watermarkId =
+        currentMaxId > this.lastDispatchedId ? currentMaxId : this.lastDispatchedId;
+      this.lastDispatchedId = watermarkId;
+
+      if (replaySinceEventId !== null) {
+        subscriber.lastSentEventId = replaySinceEventId;
+        await this.replayEventsForSubscriber(subscriber, replaySinceEventId, watermarkId);
+        if (watermarkId > subscriber.lastSentEventId) {
+          subscriber.lastSentEventId = watermarkId;
+        }
+      } else {
+        subscriber.lastSentEventId = watermarkId;
+      }
+
+      if (subscriber.closed) {
+        return;
+      }
+
+      this.subscribers.set(subscriber.id, subscriber);
+    });
   }
 
-  private async replayEventsForSubscriber(
+  /**
+   * Cursor-paginated replay over `(sinceEventId, upToEventId]` in bounded batches of 250 rows.
+   * Filters out leader-only events directly in SQL when replaying for a non-leader team member
+   * so >500 leader-only events never starve a regular member.
+   */
+  public async replayEventsForSubscriber(
     subscriber: SseSubscriber,
     sinceEventId: bigint,
     upToEventId: bigint,
   ): Promise<void> {
+    let cursorId = sinceEventId;
+
     if (subscriber.kind === 'board') {
-      const res = await this.pool.query<OutboxEventRow>(
-        `
-        SELECT id::text AS id, hackathon_id, team_id, scope, event_type, payload, created_at
-        FROM outbox_events
-        WHERE hackathon_id = $1
-          AND scope IN ('board', 'both')
-          AND id > $2::bigint
-          AND id <= $3::bigint
-        ORDER BY id ASC
-        LIMIT 500
-        `,
-        [subscriber.hackathonId, sinceEventId.toString(), upToEventId.toString()],
-      );
+      while (cursorId < upToEventId && !subscriber.closed) {
+        const res = await this.pool.query<OutboxEventRow>(
+          `
+          SELECT id::text AS id, hackathon_id, team_id, scope, event_type, payload, created_at
+          FROM outbox_events
+          WHERE hackathon_id = $1
+            AND scope IN ('board', 'both')
+            AND id > $2::bigint
+            AND id <= $3::bigint
+          ORDER BY id ASC
+          LIMIT $4
+          `,
+          [
+            subscriber.hackathonId,
+            cursorId.toString(),
+            upToEventId.toString(),
+            REPLAY_PAGE_BATCH_SIZE,
+          ],
+        );
 
-      for (const row of res.rows) {
-        if (subscriber.closed) {
-          return;
+        if (res.rows.length === 0) {
+          break;
         }
-        await this.deliverRowToSubscriber(subscriber, row);
+
+        for (const row of res.rows) {
+          if (subscriber.closed) {
+            return;
+          }
+          cursorId = BigInt(row.id);
+          await this.deliverRowToSubscriber(subscriber, row, true);
+        }
+
+        if (res.rows.length < REPLAY_PAGE_BATCH_SIZE) {
+          break;
+        }
       }
-    } else {
+      return;
+    }
+
+    // Team subscriber: check current role once before paginated replay so SQL can filter leader-only events
+    const authState = await this.verifyTeamSubscriberAccess(subscriber, 'TEAM_UPDATED');
+    if (!authState.authorized) {
+      this.closeSubscriber(subscriber.id);
+      return;
+    }
+
+    const isLeader = authState.role === 'leader';
+
+    while (cursorId < upToEventId && !subscriber.closed) {
       const res = await this.pool.query<OutboxEventRow>(
-        `
-        SELECT id::text AS id, hackathon_id, team_id, scope, event_type, payload, created_at
-        FROM outbox_events
-        WHERE team_id = $1
-          AND scope IN ('team', 'both')
-          AND id > $2::bigint
-          AND id <= $3::bigint
-        ORDER BY id ASC
-        LIMIT 500
-        `,
-        [subscriber.teamId, sinceEventId.toString(), upToEventId.toString()],
+        isLeader
+          ? `
+            SELECT id::text AS id, hackathon_id, team_id, scope, event_type, payload, created_at
+            FROM outbox_events
+            WHERE team_id = $1
+              AND scope IN ('team', 'both')
+              AND id > $2::bigint
+              AND id <= $3::bigint
+            ORDER BY id ASC
+            LIMIT $4
+            `
+          : `
+            SELECT id::text AS id, hackathon_id, team_id, scope, event_type, payload, created_at
+            FROM outbox_events
+            WHERE team_id = $1
+              AND scope IN ('team', 'both')
+              AND NOT (event_type = ANY($5::text[]))
+              AND id > $2::bigint
+              AND id <= $3::bigint
+            ORDER BY id ASC
+            LIMIT $4
+            `,
+        isLeader
+          ? [
+              subscriber.teamId,
+              cursorId.toString(),
+              upToEventId.toString(),
+              REPLAY_PAGE_BATCH_SIZE,
+            ]
+          : [
+              subscriber.teamId,
+              cursorId.toString(),
+              upToEventId.toString(),
+              REPLAY_PAGE_BATCH_SIZE,
+              LEADER_ONLY_EVENT_TYPES_ARRAY,
+            ],
       );
+
+      if (res.rows.length === 0) {
+        break;
+      }
 
       for (const row of res.rows) {
         if (subscriber.closed) {
           return;
         }
-        await this.deliverRowToSubscriber(subscriber, row);
+        cursorId = BigInt(row.id);
+        await this.deliverRowToSubscriber(subscriber, row, true);
+      }
+
+      if (res.rows.length < REPLAY_PAGE_BATCH_SIZE) {
+        break;
       }
     }
   }
@@ -410,7 +638,11 @@ export class OutboxSseDispatcher {
     try {
       do {
         this.drainRequested = false;
-        await this.drainNewOutboxEvents();
+        await this.runExclusive(async () => {
+          if (!this.shuttingDown) {
+            await this.drainNewOutboxEventsInternal();
+          }
+        });
       } while (this.drainRequested && !this.shuttingDown);
     } catch {
       // Prevent background drain error from crashing process; next poll recovers
@@ -419,7 +651,7 @@ export class OutboxSseDispatcher {
     }
   }
 
-  private async drainNewOutboxEvents(): Promise<void> {
+  private async drainNewOutboxEventsInternal(): Promise<void> {
     if (this.subscribers.size === 0) {
       const maxRes = await this.pool.query<{ max_id: string | null }>(
         'SELECT MAX(id)::text AS max_id FROM outbox_events',
@@ -433,28 +665,62 @@ export class OutboxSseDispatcher {
       return;
     }
 
-    const res = await this.pool.query<OutboxEventRow>(
-      `
-      SELECT id::text AS id, hackathon_id, team_id, scope, event_type, payload, created_at
-      FROM outbox_events
-      WHERE id > $1::bigint
-      ORDER BY id ASC
-      LIMIT 200
-      `,
-      [this.lastDispatchedId.toString()],
-    );
+    // First recover any subscriber that experienced a transient DB error on a prior drain cycle
+    for (const sub of Array.from(this.subscribers.values())) {
+      if (!sub.closed && sub.needsCatchup && sub.lastSentEventId < this.lastDispatchedId) {
+        try {
+          sub.needsCatchup = false;
+          await this.replayEventsForSubscriber(sub, sub.lastSentEventId, this.lastDispatchedId);
+        } catch {
+          sub.needsCatchup = true;
+        }
+      }
+    }
 
-    for (const row of res.rows) {
-      const rowId = BigInt(row.id);
-      if (rowId > this.lastDispatchedId) {
-        this.lastDispatchedId = rowId;
+    while (!this.shuttingDown) {
+      const res = await this.pool.query<OutboxEventRow>(
+        `
+        SELECT id::text AS id, hackathon_id, team_id, scope, event_type, payload, created_at
+        FROM outbox_events
+        WHERE id > $1::bigint
+        ORDER BY id ASC
+        LIMIT 250
+        `,
+        [this.lastDispatchedId.toString()],
+      );
+
+      if (res.rows.length === 0) {
+        break;
       }
 
-      const activeSubscribers = Array.from(this.subscribers.values());
-      for (const sub of activeSubscribers) {
-        if (!sub.closed) {
-          await this.deliverRowToSubscriber(sub, row);
+      for (const row of res.rows) {
+        const rowId = BigInt(row.id);
+        const activeSubscribers = Array.from(this.subscribers.values());
+
+        for (const sub of activeSubscribers) {
+          if (sub.closed) {
+            continue;
+          }
+          try {
+            // If subscriber fell behind due to an earlier transient error, catch it up before delivering rowId
+            if (sub.needsCatchup && sub.lastSentEventId < rowId - 1n) {
+              sub.needsCatchup = false;
+              await this.replayEventsForSubscriber(sub, sub.lastSentEventId, rowId - 1n);
+            }
+            await this.deliverRowToSubscriber(sub, row, false);
+          } catch {
+            // Isolate per-subscriber transient failure: keep sub.lastSentEventId unchanged and mark for catch-up
+            sub.needsCatchup = true;
+          }
         }
+
+        if (rowId > this.lastDispatchedId) {
+          this.lastDispatchedId = rowId;
+        }
+      }
+
+      if (res.rows.length < 250) {
+        break;
       }
     }
   }
@@ -462,6 +728,7 @@ export class OutboxSseDispatcher {
   private async deliverRowToSubscriber(
     subscriber: SseSubscriber,
     row: OutboxEventRow,
+    isReplay = false,
   ): Promise<void> {
     const eventId = BigInt(row.id);
     if (eventId <= subscriber.lastSentEventId || subscriber.closed) {
@@ -470,10 +737,16 @@ export class OutboxSseDispatcher {
 
     if (subscriber.kind === 'board') {
       if (row.hackathon_id !== subscriber.hackathonId) {
+        if (!isReplay && eventId > subscriber.lastSentEventId) {
+          subscriber.lastSentEventId = eventId;
+        }
         return;
       }
       const projected = projectPublicBoardSseEvent(row);
       if (!projected) {
+        if (!isReplay && eventId > subscriber.lastSentEventId) {
+          subscriber.lastSentEventId = eventId;
+        }
         return;
       }
       this.writeFrameToSubscriber(
@@ -490,6 +763,9 @@ export class OutboxSseDispatcher {
 
     // Team stream subscriber: must match team_id
     if (row.team_id !== subscriber.teamId) {
+      if (!isReplay && eventId > subscriber.lastSentEventId) {
+        subscriber.lastSentEventId = eventId;
+      }
       return;
     }
 
@@ -511,6 +787,9 @@ export class OutboxSseDispatcher {
 
     const projected = projectTeamStreamSseEvent(row, authState.role);
     if (!projected) {
+      if (eventId > subscriber.lastSentEventId) {
+        subscriber.lastSentEventId = eventId;
+      }
       return;
     }
 
@@ -593,7 +872,6 @@ export class OutboxSseDispatcher {
     }
 
     if (subscriber.queuedFrames >= MAX_SUBSCRIBER_QUEUED_FRAMES) {
-      // Backpressure limit exceeded on slow client -> close stream to protect server memory
       this.closeSubscriber(subscriber.id);
       return;
     }

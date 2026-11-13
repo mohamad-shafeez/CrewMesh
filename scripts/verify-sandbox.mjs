@@ -1,18 +1,16 @@
 #!/usr/bin/env node
 /**
- * Sandbox Verification Utility
- * Uses the system-installed @babel/core TypeScript & JSX parser in /usr/share/nodejs
+ * Sandbox & Clean-Checkout Verification Utility
+ * Uses `scripts/ts-loader.mjs` (which resolves project-local `typescript` or `@babel/core`
+ * first and falls back to offline sandbox packages only when `node_modules` is absent)
  * to verify that all .ts and .tsx source files across packages/shared, apps/api, and apps/web
  * parse and transpile cleanly with zero syntax errors.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-
-const require = createRequire('/usr/share/nodejs/index.js');
-const babel = require('@babel/core');
+import { getActiveTranspilerKind, transpileTypeScriptSource } from './ts-loader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,31 +39,23 @@ const files = [
 let compiledCount = 0;
 for (const filePath of files) {
   const code = fs.readFileSync(filePath, 'utf8');
-  const isTsx = filePath.endsWith('.tsx');
-  const presets = [
-    [
-      require.resolve('@babel/preset-typescript'),
-      { isTSX: isTsx, allExtensions: true },
-    ],
-  ];
+  const output = transpileTypeScriptSource(code, filePath);
 
-  const result = babel.transformSync(code, {
-    filename: filePath,
-    presets,
-    configFile: false,
-    babelrc: false,
-  });
-
-  if (!result || typeof result.code !== 'string') {
+  if (!output || typeof output !== 'string') {
     throw new Error(`Failed to transpile ${filePath}`);
   }
   compiledCount += 1;
 }
 
 console.info(
-  JSON.stringify({
-    status: 'OK',
-    verifiedFilesCount: compiledCount,
-    files: files.map((f) => path.relative(rootDir, f)),
-  }, null, 2),
+  JSON.stringify(
+    {
+      status: 'OK',
+      transpiler: getActiveTranspilerKind(),
+      verifiedFilesCount: compiledCount,
+      files: files.map((f) => path.relative(rootDir, f)),
+    },
+    null,
+    2,
+  ),
 );

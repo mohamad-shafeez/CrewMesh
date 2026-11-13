@@ -1,39 +1,85 @@
 import type { PoolClient } from 'pg';
 import type { AuditAction, OutboxEventType } from '@crewmesh/shared';
 
-const FORBIDDEN_METADATA_KEYS = new Set([
-  'password',
-  'password_hash',
-  'passwordHash',
-  'token',
-  'token_hash',
-  'tokenHash',
-  'code',
-  'rawCode',
-  'inviteToken',
-  'sessionToken',
-  'csrfToken',
-  'csrf_token_hash',
-]);
+/**
+ * Determines whether an object property key represents sensitive authentication,
+ * credential, token, invite-code, or personal email data that must never appear
+ * in `audit_log` or `outbox_events`.
+ *
+ * Normalizes case and strips underscores/hyphens/spaces before matching, while
+ * explicitly preserving safe non-secret prefix/identifier metadata (`tokenPrefix`, `inviteCodeId`).
+ */
+export function isSensitiveMetadataKey(rawKey: string): boolean {
+  const normalized = rawKey
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  // Safe non-secret 8-char prefix of an invite code or UUID identifier is explicitly permitted
+  if (normalized === 'tokenprefix' || normalized === 'invitecodeid') {
+    return false;
+  }
+
+  if (
+    normalized.includes('password') ||
+    normalized.includes('passwd') ||
+    normalized.includes('pwd') ||
+    normalized.includes('secret') ||
+    normalized.includes('token') ||
+    normalized.includes('csrf') ||
+    normalized.includes('cookie') ||
+    normalized.includes('session') ||
+    normalized.includes('email') ||
+    normalized.includes('authorization') ||
+    normalized.includes('authheader') ||
+    normalized.includes('credential') ||
+    normalized.includes('privatekey') ||
+    normalized.includes('invitecode') ||
+    normalized.includes('rawcode') ||
+    normalized.includes('plaintextcode') ||
+    normalized === 'code'
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function sanitizeNestedValue(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeNestedValue(item));
+  }
+  if (typeof value === 'object' && !(value instanceof Date)) {
+    return sanitizeEventMetadata(value as Record<string, unknown>);
+  }
+  return value;
+}
 
 /**
- * Strips any sensitive secret keys from metadata before writing to audit_log or outbox_events.
+ * Recursively strips any sensitive secret or private keys from plain objects,
+ * nested objects, arrays of objects, and nested arrays before writing to
+ * `audit_log` or `outbox_events` or projecting to SSE subscribers.
  */
 export function sanitizeEventMetadata(
   input: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
-  if (!input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return {};
   }
   const clean: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(input)) {
-    if (FORBIDDEN_METADATA_KEYS.has(key)) {
+    if (isSensitiveMetadataKey(key)) {
       continue;
     }
-    if (val !== undefined && typeof val === 'object' && val !== null && !Array.isArray(val)) {
-      clean[key] = sanitizeEventMetadata(val as Record<string, unknown>);
-    } else {
-      clean[key] = val;
+    if (val !== undefined) {
+      clean[key] = sanitizeNestedValue(val);
     }
   }
   return clean;
@@ -105,6 +151,7 @@ export async function insertAuditLog(
 
 /**
  * Appends a durable outbox event inside the caller's active PostgreSQL transaction.
+ * Sequence ID is allocated under `pg_advisory_xact_lock(842026002)` by `trg_outbox_events_serialize_id`.
  */
 export async function insertOutboxEvent(
   client: PoolClient,
