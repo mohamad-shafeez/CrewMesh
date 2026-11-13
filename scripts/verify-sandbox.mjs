@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 /**
- * Sandbox & Clean-Checkout Verification Utility
- * Uses `scripts/ts-loader.mjs` (which resolves project-local `typescript` or `@babel/core`
- * first and falls back to offline sandbox packages only when `node_modules` is absent)
- * to verify that all .ts and .tsx source files across packages/shared, apps/api, and apps/web
- * parse and transpile cleanly with zero syntax errors.
+ * Clean-Checkout & Source Transpilation Verifier
+ * Uses `scripts/ts-loader.mjs` (resolving declared `typescript` or `@babel/core`
+ * from root `package.json`) to verify that all 62 `.ts` and `.tsx` source and test files
+ * across `packages/shared`, `apps/api`, and `apps/web` parse and transpile cleanly.
  */
 
 import fs from 'node:fs';

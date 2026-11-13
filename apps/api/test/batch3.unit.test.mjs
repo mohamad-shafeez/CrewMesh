@@ -3,93 +3,50 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { loadTsModule } from '../../../scripts/ts-loader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const LEADER_ONLY_TEAM_EVENTS = new Set([
-  'JOIN_REQUEST_CREATED',
-  'JOIN_REQUEST_DECLINED',
-  'INVITE_CREATED',
-  'INVITE_REVOKED',
-]);
+const sharedMod = loadTsModule(path.resolve(__dirname, '../../../packages/shared/src/index.ts'));
+const errorHandlerMod = loadTsModule(path.resolve(__dirname, '../src/plugins/error-handler.ts'), {
+  '@crewmesh/shared': sharedMod,
+  zod: { ZodError: class ZodError extends Error {} },
+  '../config/env.js': { getEnv: () => ({ NODE_ENV: 'test' }) },
+});
+const auditOutboxMod = loadTsModule(
+  path.resolve(__dirname, '../src/services/audit-outbox-service.ts'),
+  {
+    '@crewmesh/shared': sharedMod,
+  },
+);
+const sseDispatcherMod = loadTsModule(
+  path.resolve(__dirname, '../src/services/sse-dispatcher.ts'),
+  {
+    pg: { Client: class MockPgClient {} },
+    '@crewmesh/shared': sharedMod,
+    '../config/env.js': {
+      getEnv: () => ({
+        NODE_ENV: 'test',
+        DATABASE_URL: 'postgresql://localhost/test',
+        DATABASE_SSL: 'disable',
+      }),
+    },
+    '../db/pool.js': {
+      getDbPool: () => ({}),
+      resolvePgSslOptions: () => undefined,
+    },
+    '../plugins/error-handler.js': errorHandlerMod,
+    './audit-outbox-service.js': auditOutboxMod,
+  },
+);
 
-function parseLastEventId(rawHeader) {
-  const value = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
-  if (value === undefined || value === null) {
-    return null;
-  }
-  const trimmed = String(value).trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-  if (!/^\d{1,20}$/.test(trimmed)) {
-    throw new Error('Last-Event-ID must be a non-negative integer');
-  }
-  const parsed = BigInt(trimmed);
-  if (parsed > 9223372036854775807n) {
-    throw new Error('Last-Event-ID exceeds PostgreSQL BIGINT bounds');
-  }
-  return parsed;
-}
-
-function projectPublicBoardSseEvent(row) {
-  if (row.scope !== 'board' && row.scope !== 'both') {
-    return null;
-  }
-  if (LEADER_ONLY_TEAM_EVENTS.has(row.event_type)) {
-    return null;
-  }
-  const p = row.payload ?? {};
-  const createdAt =
-    row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at);
-
-  return {
-    eventId: String(row.id),
-    eventType: row.event_type,
-    hackathonId: row.hackathon_id,
-    teamId: row.team_id,
-    ...(typeof p.status === 'string' ? { status: p.status } : {}),
-    ...(typeof p.memberCount === 'number' ? { memberCount: p.memberCount } : {}),
-    ...(typeof p.minTeamSize === 'number' ? { minTeamSize: p.minTeamSize } : {}),
-    ...(typeof p.maxTeamSize === 'number' ? { maxTeamSize: p.maxTeamSize } : {}),
-    ...(typeof p.isFull === 'boolean' ? { isFull: p.isFull } : {}),
-    createdAt,
-  };
-}
-
-function projectTeamStreamSseEvent(row, memberRole) {
-  if (!row.team_id) {
-    return null;
-  }
-  if (row.scope !== 'team' && row.scope !== 'both') {
-    return null;
-  }
-  if (LEADER_ONLY_TEAM_EVENTS.has(row.event_type) && memberRole !== 'leader') {
-    return null;
-  }
-  const safeData = { ...(row.payload ?? {}) };
-  delete safeData.email;
-  delete safeData.code;
-  delete safeData.token;
-  delete safeData.password_hash;
-
-  const createdAt =
-    row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at);
-
-  return {
-    eventId: String(row.id),
-    eventType: row.event_type,
-    hackathonId: row.hackathon_id,
-    teamId: row.team_id,
-    data: safeData,
-    createdAt,
-  };
-}
-
-function formatSseFrame(params) {
-  return `id: ${params.id}\nevent: ${params.event}\ndata: ${JSON.stringify(params.data)}\n\n`;
-}
+const {
+  parseLastEventId,
+  projectPublicBoardSseEvent,
+  projectTeamStreamSseEvent,
+  formatSseFrame,
+} = sseDispatcherMod;
 
 test('1. parseLastEventId safely parses 64-bit PostgreSQL BIGINT IDs beyond Number.MAX_SAFE_INTEGER', () => {
   assert.equal(parseLastEventId(undefined), null);

@@ -184,7 +184,7 @@ describe('Phase 1 — Foundation, Database Invariants, and Auth Integration Suit
       url: '/api/v1/auth/register',
       headers: { origin: TEST_ORIGIN },
       payload: {
-        email: 'participant@hack4hack.com',
+        email: 'participant@example.com',
         password: 'StrongPassword#1234',
         displayName: 'First User',
       },
@@ -196,7 +196,7 @@ describe('Phase 1 — Foundation, Database Invariants, and Auth Integration Suit
       url: '/api/v1/auth/register',
       headers: { origin: TEST_ORIGIN },
       payload: {
-        email: '  PARTICIPANT@HACK4HACK.COM ',
+        email: '  PARTICIPANT@EXAMPLE.COM ',
         password: 'AnotherPassword#5678',
         displayName: 'Duplicate User',
       },

@@ -22,17 +22,29 @@ const poolMod = loadTsModule(path.join(repoRoot, 'apps/api/src/db/pool.ts'), {
   },
 });
 
-test('1. scripts/ts-loader.mjs contains zero OS-specific /usr/share/nodejs paths and executes real production TypeScript modules', () => {
+test('1. scripts/ts-loader.mjs and .eslintrc.js contain zero OS-specific fallback paths or Module._load shims and execute real production TypeScript modules', () => {
   const loaderSource = fs.readFileSync(path.join(repoRoot, 'scripts/ts-loader.mjs'), 'utf8');
   assert.equal(
-    loaderSource.includes('/usr/share/nodejs'),
+    loaderSource.includes('usr/share'),
     false,
-    'scripts/ts-loader.mjs must not reference /usr/share/nodejs',
+    'scripts/ts-loader.mjs must not reference OS-specific share directories',
   );
   assert.equal(
-    loaderSource.includes('/usr/local/lib'),
+    loaderSource.includes('usr/local/lib'),
     false,
-    'scripts/ts-loader.mjs must not reference /usr/local/lib',
+    'scripts/ts-loader.mjs must not reference OS-specific lib directories',
+  );
+
+  const eslintConfig = fs.readFileSync(path.join(repoRoot, '.eslintrc.js'), 'utf8');
+  assert.equal(
+    eslintConfig.includes('Module._load'),
+    false,
+    '.eslintrc.js must not monkey-patch Module._load',
+  );
+  assert.equal(
+    eslintConfig.includes('@babel/eslint-parser'),
+    false,
+    '.eslintrc.js must not silently fall back to @babel/eslint-parser',
   );
 
   const kind = getActiveTranspilerKind();
@@ -43,7 +55,7 @@ test('1. scripts/ts-loader.mjs contains zero OS-specific /usr/share/nodejs paths
   );
 
   // Exercise production shared module functions through the loader
-  assert.equal(sharedMod.normalizeEmail('  Alice@CrewMesh.IO '), 'alice@crewmesh.io');
+  assert.equal(sharedMod.normalizeEmail('  Alice@Example.COM '), 'alice@example.com');
   assert.deepEqual(sharedMod.normalizeSkillTags(['TypeScript', '  typescript ', 'Rust']), [
     'typescript',
     'rust',
@@ -100,7 +112,7 @@ test('3. .github/workflows/ci.yml enforces package-lock.json presence and npm ci
   );
 });
 
-test('4. Workspace script matrix in root, shared, api, and web package.json files is complete and enforces shared build ordering', () => {
+test('4. Workspace script matrix and dependency declarations in root, shared, api, and web package.json files are clean and complete', () => {
   const rootPkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
   const sharedPkg = JSON.parse(
     fs.readFileSync(path.join(repoRoot, 'packages/shared/package.json'), 'utf8'),
@@ -113,6 +125,7 @@ test('4. Workspace script matrix in root, shared, api, and web package.json file
     'dev:api',
     'dev:web',
     'lint',
+    'lint:scripts',
     'typecheck',
     'test',
     'test:integration',
@@ -154,13 +167,15 @@ test('4. Workspace script matrix in root, shared, api, and web package.json file
 
   assert.equal(typeof sharedPkg.scripts.build, 'string');
   assert.equal(typeof sharedPkg.scripts.typecheck, 'string');
+  assert.equal(typeof sharedPkg.devDependencies?.typescript, 'string');
+  assert.equal('@fastify/cookie' in (apiPkg.dependencies ?? {}), false);
   assert.equal(apiPkg.scripts.prebuild, 'npm --prefix ../../packages/shared run build');
   assert.equal(apiPkg.scripts.pretypecheck, 'npm --prefix ../../packages/shared run build');
   assert.equal(webPkg.scripts.prebuild, 'npm --prefix ../../packages/shared run build');
   assert.equal(webPkg.scripts.pretypecheck, 'npm --prefix ../../packages/shared run build');
 });
 
-test('5. Complete Batches 1-9 regression inventory and pre-deployment hygiene checks pass', () => {
+test('5. Complete Batches 1-10 regression inventory and pre-deployment hygiene checks pass', () => {
   const expectedFiles = [
     'apps/api/migrations/001_initial_schema.up.sql',
     'apps/api/migrations/001_initial_schema.down.sql',

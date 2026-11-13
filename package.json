@@ -1,6 +1,6 @@
 {
   "name": "crewmesh",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "private": true,
   "description": "CrewMesh — Race-proof team formation service for Hack4Hack Crew Hiring Challenge 2026 (PS1)",
   "engines": {
@@ -17,6 +17,7 @@
     "dev:api": "npm run dev --workspace=@crewmesh/api",
     "dev:web": "npm run dev --workspace=@crewmesh/web",
     "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"apps/*/src/**/*.{ts,tsx}\" \"apps/*/test/**/*.{ts,mjs}\" \"apps/web/e2e/**/*.ts\" \"scripts/*.mjs\"",
+    "lint:scripts": "eslint \"scripts/*.mjs\" \"apps/api/test/*.mjs\"",
     "typecheck": "npm run build --workspace=@crewmesh/shared && npm run typecheck --workspace=@crewmesh/shared && npm run typecheck --workspace=@crewmesh/api && npm run typecheck --workspace=@crewmesh/web",
     "test": "npm run build --workspace=@crewmesh/shared && npm run test --workspace=@crewmesh/api && npm run test --workspace=@crewmesh/web",
     "test:integration": "npm run build --workspace=@crewmesh/shared && npm run test:integration --workspace=@crewmesh/api",
@@ -38,7 +39,6 @@
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
-    "@babel/eslint-parser": "^7.25.1",
     "@babel/plugin-transform-modules-commonjs": "^7.24.8",
     "@babel/preset-typescript": "^7.24.7",
     "@typescript-eslint/eslint-plugin": "^7.18.0",

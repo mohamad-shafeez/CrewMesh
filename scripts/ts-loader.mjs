@@ -81,6 +81,12 @@ export function loadTsModule(tsFilePath, customRequireMap = {}) {
     if (Object.prototype.hasOwnProperty.call(customRequireMap, id)) {
       return customRequireMap[id];
     }
+    if (id.startsWith('.')) {
+      const candidateTs = path.resolve(path.dirname(tsFilePath), id.replace(/\.js$/, '.ts'));
+      if (fs.existsSync(candidateTs)) {
+        return loadTsModule(candidateTs, customRequireMap);
+      }
+    }
     return activeTranspiler.baseRequire(id);
   };
 

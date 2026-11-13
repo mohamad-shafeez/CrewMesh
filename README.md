@@ -17,29 +17,29 @@ During high-concurrency hackathon launches, hundreds of participants simultaneou
 
 ---
 
-## 2. Verification & Execution Status Matrix (Batches 01–09)
+## 2. Verification & Execution Status Matrix (Batches 01–10)
 
 In accordance with strict engineering honesty, the table below distinguishes between what is **implemented in source**, what has been **executed and verified locally in the sandbox**, what is **wired for PostgreSQL 16 / GitHub Actions execution**, and what remains **blocked locally due to offline container constraints**:
 
 | Subsystem / Verification Suite | Implementation Status | Local Sandbox Execution Status | PostgreSQL 16 / Browser / k6 Status | Details & Evidence |
 | :--- | :--- | :--- | :--- | :--- |
 | **Monorepo Source & AST Verification (`npm run verify:sandbox`)** | **Implemented** | **Executed & Passed (`62 / 62` `.ts`/`.tsx` files)** | N/A | Transpiles all 62 TypeScript/TSX modules and verifies migrations `001`–`007`, routes, and schemas. |
-| **ESLint Static Analysis (`npm run lint`)** | **Implemented** | **Executed & Passed (`0` errors, `0` warnings)** | Configured in CI | Lints all `packages/*/src/**/*.{ts,tsx}`, `apps/*/src/**/*.{ts,tsx}`, `apps/*/test/**/*.{ts,mjs}`, `apps/web/e2e/**/*.ts`, and `scripts/*.mjs`. |
-| **Isolated Unit & Invariant Suite (`npm run test:unit:sandbox`)** | **Implemented** | **Executed & Passed (`57 / 57` tests across Batches 1–9)** | Configured in CI | Executes production TypeScript modules via `scripts/ts-loader.mjs` (cryptography, CSRF, cursors, recursive metadata sanitization, SSE allowlist projections, multi-page SSE replay `> 500` events, subscriber error recovery, `crewmesh-match-v1` scoring, 10k/2k deterministic dataset generation, and SSL config). |
-| **Root `package-lock.json` & `npm ci`** | **Blocked Offline** | **`NOT RUN` (`EAI_AGAIN registry.npmjs.org`)** | Enforced in `.github/workflows/ci.yml` | Outbound internet access is disabled in the current build sandbox, so a registry-resolved `package-lock.json` was not fabricated. CI enforces `package-lock.json` presence and `npm ci`. |
+| **Isolated Unit & Invariant Suite (`npm run test:unit:sandbox`)** | **Implemented** | **Executed & Passed (`57 / 57` tests across Batches 1–9)** | Configured in CI | All 9 unit test files (`phase1` through `batch9`) load and execute the real production TypeScript modules via `scripts/ts-loader.mjs` (cryptography, CSRF, cursors, recursive metadata sanitization, SSE allowlist projections, multi-page SSE replay `> 500` events, subscriber error recovery, `crewmesh-match-v1` scoring, 10k/2k deterministic dataset generation, and SSL config). |
+| **ESLint Script & Test Linting (`npm run lint:scripts`)** | **Implemented** | **Executed & Passed (`0` errors, `0` warnings)** | Configured in CI (`npm run lint`) | `.eslintrc.js` uses ESLint's built-in `espree` parser for `.js`/`.mjs` files and `@typescript-eslint/parser` for `.ts`/`.tsx` files (without silent optional-parser fallback). Full `.ts`/`.tsx` linting (`npm run lint`) requires `npm ci` to install `@typescript-eslint/parser`. |
+| **Root `package-lock.json` & `npm ci`** | **Blocked Offline** | **`NOT RUN` (`ENOTCACHED` on `--offline`; `EAI_AGAIN registry.npmjs.org` online)** | Enforced in `.github/workflows/ci.yml` | Outbound internet access is disabled and no cached npm metadata exists in the container (`~/.npm` has no `_cacache`), so a registry-resolved `package-lock.json` was not fabricated. CI enforces `package-lock.json` presence and `npm ci`. |
 | **TypeScript `tsc --noEmit` & Production Build (`npm run typecheck`, `npm run build`)** | **Implemented** | **`NOT RUN` locally (requires `npm ci` binaries `tsc` & `vite`)** | Configured in `.github/workflows/ci.yml` | Workspace scripts and `prebuild`/`pretypecheck` hooks build `@crewmesh/shared` declarations before `@crewmesh/api` and `@crewmesh/web`. |
 | **PostgreSQL Integration & Hardening (`npm run test:integration`, `npm run test:hardening`)** | **Implemented** | **`NOT RUN` locally (no local PostgreSQL 16 daemon)** | Configured in `.github/workflows/ci.yml` (`postgres:16-alpine`) | Covers `phase1.integration.test.ts`, `batch2.integration.test.ts`, `batch3.sse.integration.test.ts`, `batch5.suggestions.integration.test.ts`, `scale-seed.integration.test.ts`, and `batch7.hardening.integration.test.ts`. |
 | **50-Way Last-Seat & Invite Race Suite (`npm run test:race`)** | **Implemented** | **`NOT RUN` locally (no local PostgreSQL 16 daemon)** | Configured in `.github/workflows/ci.yml` | Fires 50 barrier-synchronized transactions against 1 remaining team slot; asserts exactly `1` winner (`200`) and `49` deterministic `409` rejections. |
 | **Playwright Desktop & Mobile E2E (`npm run test:e2e`)** | **Implemented** | **`NOT RUN` locally (no Chromium + PostgreSQL daemon)** | Configured in `.github/workflows/ci.yml` | Tests full registration, team creation, invite redemption, leader approval, live SSE updates, and `360px`/`390px` mobile viewports (`apps/web/e2e/crewmesh.spec.ts`). |
-| **10k Participant / 2k Team Scale Seed & 100-VU k6 Benchmark (`npm run db:seed:scale`, `npm run bench:board:k6`)** | **Implemented** | **Dataset generator verified in memory (`57/57` unit tests); live DB/k6 `NOT RUN` locally** | Configured in `.github/workflows/ci.yml` (`scale-and-k6-benchmark`) | **Benchmark Target**: `p(95) < 200 ms`, error rate `< 1%` at `100` VUs for `60s`. **Actual Live Benchmark Result**: Pending execution in a networked PostgreSQL 16 + Grafana k6 runner (no synthetic numbers fabricated). |
-| **Live Production Deployment** | **Pre-Deployment Validated** | **Not Deployed (Per Batch 09 Rules)** | Same-origin Fastify + Vite SPA ready (`SERVE_WEB_DIST=true`) | Documented in `docs/deployment-architecture.md`. |
+| **10k Participant / 2k Team Scale Seed & 100-VU k6 Benchmark (`npm run db:seed:scale`, `npm run bench:board:k6`)** | **Implemented** | **Dataset generator verified in memory (`57/57` unit tests); live DB/k6 `NOT RUN` locally** | Configured in `.github/workflows/ci.yml` (`scale-and-k6-benchmark`) | **Benchmark Target**: `p(95) < 200 ms`, error rate `< 1%` at `100` VUs for `60s`. **Actual Live Benchmark Result**: `NOT RUN` locally (pending execution in a networked PostgreSQL 16 + Grafana k6 runner; no synthetic numbers fabricated). |
+| **Live Production Deployment** | **Pre-Deployment Validated** | **Not Deployed (Per Batch 10 Rules)** | Same-origin Fastify + Vite SPA ready (`SERVE_WEB_DIST=true`) | Documented in `docs/deployment-architecture.md`. |
 
 ---
 
 ## 3. Repository Structure
 
 ```text
-crewmesh/
+CrewMesh_Hack4Hack_PS1_Final/
 ├── .env.example                      # Documented environment template (zero secrets)
 ├── .eslintrc.js                      # Monorepo ESLint configuration (.ts, .tsx, .mjs)
 ├── .github/workflows/ci.yml          # GitHub Actions workflow (PostgreSQL 16, Playwright, k6)
@@ -66,6 +66,8 @@ crewmesh/
 │   ├── deployment-architecture.md    # Same-origin production validation & zero-cost hosting guide
 │   ├── transaction-lock-order.md     # 7-level deterministic PostgreSQL lock hierarchy
 │   └── workspace-script-matrix.md    # Complete audit of all npm scripts across workspaces
+├── infra/postgres/
+│   └── init-test-db.sql              # Docker initialization script for crewmesh_test & crewmesh_loadtest
 ├── reports/load-test/
 │   └── benchmark-environment.md      # k6 benchmark target, dataset specification & status
 └── scripts/
@@ -108,7 +110,8 @@ Every mutating transaction acquires row and advisory locks in strict order:
 
 ### Step-by-Step Clean-Checkout Commands
 ```bash
-# 1. Install workspace dependencies deterministically from package-lock.json
+# 1. Generate lockfile if absent in a network-enabled environment, then install via npm ci
+npm install --package-lock-only
 npm ci
 
 # 2. Copy environment configuration and start PostgreSQL 16

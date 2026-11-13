@@ -3,81 +3,46 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { loadTsModule } from '../../../scripts/ts-loader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function canonicalJsonStringify(value) {
-  if (value === null || value === undefined) {
-    return 'null';
-  }
-  if (typeof value !== 'object') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalJsonStringify(item)).join(',')}]`;
-  }
-  const sortedKeys = Object.keys(value)
-    .filter((k) => value[k] !== undefined)
-    .sort();
-  const pairs = sortedKeys.map(
-    (k) => `${JSON.stringify(k)}:${canonicalJsonStringify(value[k])}`,
-  );
-  return `{${pairs.join(',')}}`;
-}
+const sharedMod = loadTsModule(path.resolve(__dirname, '../../../packages/shared/src/index.ts'));
+const webClientMod = loadTsModule(path.resolve(__dirname, '../../web/src/api/client.ts'), {
+  '@crewmesh/shared': sharedMod,
+});
+const routerMod = loadTsModule(path.resolve(__dirname, '../../web/src/hooks/useRouter.ts'), {
+  react: {
+    useState: () => [{ pathname: '/', search: '' }, () => undefined],
+    useEffect: () => undefined,
+    useCallback: (fn) => fn,
+  },
+});
 
-function sanitizeReturnToPath(rawReturnTo) {
-  if (!rawReturnTo) {
-    return null;
-  }
-  const trimmed = rawReturnTo.trim();
-  if (!trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('://')) {
-    return null;
-  }
-  return trimmed;
-}
-
-function matchRoute(pathname, search) {
-  const cleanPath = pathname.replace(/\/+$/, '') || '/';
-  const params = new URLSearchParams(search);
-  const returnTo = sanitizeReturnToPath(params.get('returnTo'));
-
-  if (cleanPath === '/') return { name: 'landing' };
-  if (cleanPath === '/board') return { name: 'board' };
-  if (cleanPath === '/teams/new') return { name: 'create-team' };
-  if (cleanPath === '/login') return { name: 'login', returnTo };
-  if (cleanPath === '/register') return { name: 'register', returnTo };
-  if (cleanPath === '/profile') return { name: 'profile' };
-
-  const teamDetailMatch = /^\/teams\/([0-9a-fA-F-]{36})$/.exec(cleanPath);
-  if (teamDetailMatch && teamDetailMatch[1]) {
-    return { name: 'team-detail', teamId: teamDetailMatch[1] };
-  }
-  return { name: 'not-found', path: cleanPath };
-}
+const { getOrCreateIdempotencyKey, resetAllIdempotencyKeys } = webClientMod;
+const { matchRoute } = routerMod;
 
 test('1. Frontend logical idempotency key manager reuses key on identical payload and rotates on payload change', () => {
-  const pendingMap = new Map();
-  let counter = 0;
+  resetAllIdempotencyKeys();
 
-  function getOrCreateKey(scope, payload) {
-    const canonical = canonicalJsonStringify(payload ?? null);
-    const existing = pendingMap.get(scope);
-    if (existing && existing.canonical === canonical) {
-      return existing.key;
-    }
-    counter += 1;
-    const key = `cm_key_${counter}`;
-    pendingMap.set(scope, { key, canonical });
-    return key;
-  }
-
-  const k1 = getOrCreateKey('create-team:h1', { name: 'Alpha', skills: ['ts', 'pg'] });
-  const k2 = getOrCreateKey('create-team:h1', { skills: ['ts', 'pg'], name: 'Alpha' });
+  const k1 = getOrCreateIdempotencyKey('create-team:h1', {
+    name: 'Alpha',
+    skills: ['ts', 'pg'],
+  });
+  const k2 = getOrCreateIdempotencyKey('create-team:h1', {
+    skills: ['ts', 'pg'],
+    name: 'Alpha',
+  });
   assert.equal(k1, k2);
 
-  const k3 = getOrCreateKey('create-team:h1', { name: 'Beta', skills: ['ts', 'pg'] });
+  const k3 = getOrCreateIdempotencyKey('create-team:h1', {
+    name: 'Beta',
+    skills: ['ts', 'pg'],
+  });
   assert.notEqual(k1, k3);
+
+  resetAllIdempotencyKeys();
 });
 
 test('2. Router matches all 7 application routes and blocks external open-redirect returnTo URLs', () => {
