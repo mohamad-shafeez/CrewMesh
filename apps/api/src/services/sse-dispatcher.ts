@@ -165,6 +165,11 @@ export function formatSseFrame(params: {
  * Uses a single PostgreSQL LISTEN connection for low-latency wake-ups and falls back to
  * durable `outbox_events` polling so missed notifications or listener disconnects
  * never lose committed events.
+ *
+ * Commit-order guarantee (Migration 006):
+ * `trg_outbox_events_serialize_id` acquires `pg_advisory_xact_lock(842026002)` before
+ * allocating `outbox_events.id`, ensuring sequence allocation order strictly equals
+ * transaction commit visibility order.
  */
 export class OutboxSseDispatcher {
   private readonly pool: Pool;
@@ -212,7 +217,7 @@ export class OutboxSseDispatcher {
     this.pollTimer.unref?.();
 
     this.heartbeatTimer = setInterval(() => {
-      this.sendHeartbeats();
+      void this.sendHeartbeats();
     }, heartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
   }
@@ -488,6 +493,15 @@ export class OutboxSseDispatcher {
       return;
     }
 
+    // If this subscriber is the user who was just removed or departed, close their stream immediately
+    if (
+      (row.event_type === 'MEMBER_REMOVED' && row.payload?.removedUserId === subscriber.userId) ||
+      (row.event_type === 'MEMBER_LEFT' && row.payload?.departedUserId === subscriber.userId)
+    ) {
+      this.closeSubscriber(subscriber.id);
+      return;
+    }
+
     // Re-verify active session and current team membership/role against PostgreSQL
     const authState = await this.verifyTeamSubscriberAccess(subscriber, row.event_type);
     if (!authState.authorized) {
@@ -594,12 +608,23 @@ export class OutboxSseDispatcher {
     }
   }
 
-  private sendHeartbeats(): void {
+  private async sendHeartbeats(): Promise<void> {
     const comment = `: heartbeat ${new Date().toISOString()}\n\n`;
-    for (const sub of this.subscribers.values()) {
+    for (const sub of Array.from(this.subscribers.values())) {
       if (sub.closed || sub.res.writableEnded || sub.res.destroyed) {
         this.closeSubscriber(sub.id);
         continue;
+      }
+      if (sub.kind === 'team') {
+        try {
+          const authState = await this.verifyTeamSubscriberAccess(sub, 'TEAM_UPDATED');
+          if (!authState.authorized) {
+            this.closeSubscriber(sub.id);
+            continue;
+          }
+        } catch {
+          // Transient DB error during heartbeat check; keep stream open for next poll
+        }
       }
       sub.res.write(comment);
     }

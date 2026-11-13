@@ -13,9 +13,9 @@ import { decodeKeysetCursor, encodeKeysetCursor } from './cursor.js';
 import {
   addMemberToLockedTeamTx,
   assertTeamLeaderTx,
-  ensureHackathonParticipantTx,
   getTeamByIdOrThrow,
   lockTeamByIdOrThrow,
+  requireActiveHackathonParticipantTx,
   resolveHackathonOrThrow,
 } from './team-service.js';
 
@@ -100,8 +100,8 @@ export async function createJoinRequestTx(
     requireRegistrationOpen: true,
   });
 
-  // Verify/ensure the applicant is a registered participant in this hackathon
-  await ensureHackathonParticipantTx(client, team.hackathon_id, params.actorUserId);
+  // Verify the applicant is an active registered participant in this hackathon (locked FOR KEY SHARE)
+  await requireActiveHackathonParticipantTx(client, team.hackathon_id, params.actorUserId);
 
   // Check if user is already in this team or another team in the same hackathon
   const memberCheck = await client.query<{ team_id: string }>(
@@ -330,10 +330,11 @@ export async function listTeamJoinRequestsForLeader(
  * 2. Verifies caller is the current leader in PostgreSQL.
  * 3. Locks the target `join_requests` row with `SELECT ... FOR UPDATE`.
  * 4. Verifies request belongs to team and is still `'pending'`.
- * 5. If `source === 'invite_code'`, locks and increments `invite_codes.use_count` atomically.
- * 6. Calls `addMemberToLockedTeamTx` (verifying capacity against `COUNT(*)` in `team_members`
- *    and enforcing `UNIQUE (hackathon_id, user_id)`).
- * 7. Marks the join request `'accepted'` and writes audit + outbox events in the same transaction.
+ * 5. Calls `addMemberToLockedTeamTx` (verifying active `hackathon_participants` status `FOR KEY SHARE`,
+ *    verifying capacity against `COUNT(*)` in `team_members`, and enforcing `UNIQUE (hackathon_id, user_id)`).
+ * 6. Marks the join request `'accepted'` and writes audit + outbox events in the same transaction.
+ * Note: For `source === 'invite_code'`, the invitation usage slot (`invite_codes.use_count`) was already
+ * atomically validated and incremented during `redeemInviteCodeTx`.
  */
 export async function acceptJoinRequestTx(
   client: PoolClient,
@@ -397,58 +398,7 @@ export async function acceptJoinRequestTx(
     requireRegistrationOpen: true,
   });
 
-  // If this join request originated from an invitation code, atomically validate & consume a use slot
-  if (joinReq.source === 'invite_code' && joinReq.invite_code_id) {
-    const inviteRes = await client.query<{
-      id: string;
-      token_prefix: string;
-      max_uses: number | null;
-      use_count: number;
-      expires_at: Date;
-      revoked_at: Date | null;
-      is_expired: boolean;
-    }>(
-      `
-      SELECT
-        id,
-        token_prefix,
-        max_uses,
-        use_count,
-        expires_at,
-        revoked_at,
-        (expires_at <= NOW()) AS is_expired
-      FROM invite_codes
-      WHERE id = $1
-      FOR UPDATE
-      `,
-      [joinReq.invite_code_id],
-    );
-
-    const invite = inviteRes.rows[0];
-    if (!invite) {
-      throw new AppError(404, 'INVALID_INVITE_CODE', 'Associated invitation code no longer exists');
-    }
-    if (invite.revoked_at !== null) {
-      throw new AppError(410, 'INVITE_REVOKED', 'Associated invitation code has been revoked');
-    }
-    if (invite.is_expired) {
-      throw new AppError(410, 'INVITE_EXPIRED', 'Associated invitation code has expired');
-    }
-    if (invite.max_uses !== null && invite.use_count >= invite.max_uses) {
-      throw new AppError(
-        409,
-        'INVITE_MAX_USES_REACHED',
-        'Associated invitation code has reached its maximum allowed uses',
-      );
-    }
-
-    await client.query(
-      'UPDATE invite_codes SET use_count = use_count + 1 WHERE id = $1',
-      [invite.id],
-    );
-  }
-
-  // Step 5: Add member via shared serialized membership engine
+  // Step 5: Add member via shared serialized membership engine (also locks & verifies hackathon_participants)
   const added = await addMemberToLockedTeamTx(client, {
     team,
     candidateUserId: joinReq.user_id,
@@ -490,7 +440,7 @@ export async function acceptJoinRequestTx(
   );
   const updatedReq = updatedReqRes.rows[0]!;
 
-  // Expire any other pending join requests by this user in the same hackathon
+  // Cancel any other pending join requests by this user in the same hackathon
   await client.query(
     `
     UPDATE join_requests

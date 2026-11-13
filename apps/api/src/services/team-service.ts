@@ -111,35 +111,45 @@ export async function resolveHackathonOrThrow(
 }
 
 /**
- * Ensures `userId` is an active registered participant in `hackathonId`.
- * If no row exists yet, registers the participant automatically; if `status` is
- * `'withdrawn'` or `'disqualified'`, rejects with `403 NOT_HACKATHON_PARTICIPANT`.
+ * Verifies and locks (`FOR KEY SHARE`) the participant's registration row in `hackathon_participants`.
+ * - Rejects accounts that are not registered in the target hackathon (`403 NOT_HACKATHON_PARTICIPANT`).
+ * - Rejects participants whose status is `'withdrawn'` or `'disqualified'` (`403 NOT_HACKATHON_PARTICIPANT`).
+ * - Never auto-enrolls an unregistered platform account during team mutations.
  */
-export async function ensureHackathonParticipantTx(
+export async function requireActiveHackathonParticipantTx(
   client: PoolClient,
   hackathonId: string,
   userId: string,
 ): Promise<void> {
   const res = await client.query<{ status: HackathonParticipantStatus }>(
     `
-    INSERT INTO hackathon_participants (hackathon_id, user_id, status)
-    VALUES ($1, $2, 'registered')
-    ON CONFLICT (hackathon_id, user_id) DO UPDATE SET
-      status = hackathon_participants.status
-    RETURNING status
+    SELECT status
+    FROM hackathon_participants
+    WHERE hackathon_id = $1 AND user_id = $2
+    FOR KEY SHARE
     `,
     [hackathonId, userId],
   );
 
-  const status = res.rows[0]?.status;
-  if (status && status !== 'registered') {
+  const row = res.rows[0];
+  if (!row) {
     throw new AppError(
       403,
       'NOT_HACKATHON_PARTICIPANT',
-      `User is not an active participant in this hackathon (status: ${status})`,
+      'User is not a registered participant in this hackathon',
+    );
+  }
+
+  if (row.status !== 'registered') {
+    throw new AppError(
+      403,
+      'NOT_HACKATHON_PARTICIPANT',
+      `User is not eligible to participate in this hackathon (status: ${row.status})`,
     );
   }
 }
+
+export const ensureHackathonParticipantTx = requireActiveHackathonParticipantTx;
 
 /**
  * Locks a team row with `SELECT ... FOR UPDATE` and verifies it exists.
@@ -472,7 +482,8 @@ export async function listTeamBoard(
 
 /**
  * Shared serialized membership engine: adds `candidateUserId` to an already row-locked `team`
- * inside `client` transaction, verifying capacity from actual `team_members` rows and enforcing
+ * inside `client` transaction, verifying active participant status in `hackathon_participants`
+ * (`FOR KEY SHARE`), verifying capacity from actual `team_members` rows, and enforcing
  * the unique `(hackathon_id, user_id)` invariant.
  */
 export async function addMemberToLockedTeamTx(
@@ -489,7 +500,7 @@ export async function addMemberToLockedTeamTx(
 ): Promise<{ memberCount: number; status: TeamStatus }> {
   const { team, candidateUserId } = params;
 
-  await ensureHackathonParticipantTx(client, team.hackathon_id, candidateUserId);
+  await requireActiveHackathonParticipantTx(client, team.hackathon_id, candidateUserId);
 
   const countRes = await client.query<{ cnt: number }>(
     'SELECT COUNT(*)::int AS cnt FROM team_members WHERE team_id = $1',
@@ -619,7 +630,7 @@ export async function createTeamTx(
     requireRegistrationOpen: true,
   });
 
-  await ensureHackathonParticipantTx(client, hackathon.id, params.actorUserId);
+  await requireActiveHackathonParticipantTx(client, hackathon.id, params.actorUserId);
 
   const minSize = params.minTeamSizeOverride ?? hackathon.min_team_size;
   const maxSize = params.maxTeamSizeOverride ?? hackathon.max_team_size;

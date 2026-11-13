@@ -15,6 +15,7 @@ import {
 import {
   assertTeamLeaderTx,
   lockTeamByIdOrThrow,
+  requireActiveHackathonParticipantTx,
   resolveHackathonOrThrow,
 } from './team-service.js';
 
@@ -365,6 +366,8 @@ export async function revokeInviteCodeTx(
 /**
  * Redeems an invitation code to create a PENDING join request for leader approval.
  * NEVER directly adds the participant to `team_members`.
+ * Enforces `requireActiveHackathonParticipantTx` so unregistered, withdrawn, or disqualified
+ * accounts cannot redeem an invitation code.
  */
 export async function redeemInviteCodeTx(
   client: PoolClient,
@@ -398,6 +401,9 @@ export async function redeemInviteCodeTx(
   await resolveHackathonOrThrow(team.hackathon_id, client, {
     requireRegistrationOpen: true,
   });
+
+  // Step 4b: Verify caller is an active registered participant in this hackathon (locked FOR KEY SHARE)
+  await requireActiveHackathonParticipantTx(client, team.hackathon_id, params.actorUserId);
 
   // Step 5: Lock invite_codes row FOR UPDATE and check validity against PostgreSQL clock
   const inviteRes = await client.query<InviteCodeRow & { is_expired: boolean }>(

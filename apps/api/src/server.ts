@@ -1,13 +1,27 @@
 import { buildApp } from './app.js';
 import { getEnv } from './config/env.js';
-import { closeDbPool } from './db/pool.js';
+import { checkDatabaseReadiness, closeDbPool } from './db/pool.js';
 
 async function startServer(): Promise<void> {
   const env = getEnv();
+
+  // Fail fast at startup if PostgreSQL is unreachable
+  const dbReady = await checkDatabaseReadiness();
+  if (!dbReady.ready) {
+    throw new Error(
+      `Database readiness check failed at server startup: ${dbReady.error ?? 'Unknown DB error'}`,
+    );
+  }
+
   const app = await buildApp();
+  let shuttingDown = false;
 
   const shutdown = async (signal: string) => {
-    app.log.info({ signal }, 'Received shutdown signal; closing HTTP server and DB pool');
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    app.log.info({ signal }, 'Received shutdown signal; closing SSE streams, HTTP server, and DB pool');
     try {
       await app.close();
       await closeDbPool();

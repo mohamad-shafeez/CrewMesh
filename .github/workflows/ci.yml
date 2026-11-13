@@ -27,7 +27,7 @@ env:
 
 jobs:
   verify-and-test:
-    name: PostgreSQL 16 API, 50-Way Race, SSE, Suggestions, Build & Playwright E2E
+    name: PostgreSQL 16 API, 50-Way Race, SSE, Suggestions, Hardening, Build & Playwright E2E
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -58,8 +58,13 @@ jobs:
       - name: Install dependencies deterministically
         run: npm ci
 
-      - name: Apply PostgreSQL migrations (001 through 005)
+      - name: Apply PostgreSQL migrations (001 through 006)
         run: npm run db:migrate
+
+      - name: Verify migration 006 down and up rollback/reapply idempotency
+        run: |
+          npm run db:migrate:down
+          npm run db:migrate
 
       - name: Seed Hack4Hack 2026 event configuration
         run: npm run db:seed
@@ -73,10 +78,10 @@ jobs:
       - name: Build shared, API, and Web production bundles
         run: npm run build
 
-      - name: Run isolated unit tests (Batches 1–6)
+      - name: Run isolated unit tests (Batches 1–7)
         run: npm run test:unit:sandbox
 
-      - name: Run PostgreSQL API, SSE, Suggestions & Scale Safety integration suites (Batches 1–6)
+      - name: Run PostgreSQL API, SSE, Suggestions, Scale Safety & Batch 7 Hardening integration suites
         run: npm run test:integration --workspace=@crewmesh/api
 
       - name: Run 50-way last-seat concurrency & invite use-limit race proofs
@@ -104,7 +109,7 @@ jobs:
           kill $API_PID $WEB_PID || true
 
   scale-and-k6-benchmark:
-    name: Batch 06 — 10k Participants, 2k Teams Scale Seed & 100-VU k6 Board Benchmark (p95 < 200ms)
+    name: Batch 06/07 — 10k Participants, 2k Teams Scale Seed & 100-VU k6 Board Benchmark (p95 < 200ms)
     runs-on: ubuntu-latest
     needs: verify-and-test
     timeout-minutes: 20
@@ -141,7 +146,7 @@ jobs:
       - name: Install dependencies deterministically
         run: npm ci
 
-      - name: Apply PostgreSQL migrations (001 through 005) on isolated crewmesh_loadtest database
+      - name: Apply PostgreSQL migrations (001 through 006) on isolated crewmesh_loadtest database
         run: npm run db:migrate
 
       - name: Seed Hack4Hack 2026 event configuration without invented deadline

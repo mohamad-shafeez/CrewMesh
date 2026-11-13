@@ -1,6 +1,6 @@
 {
   "name": "crewmesh",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "CrewMesh — Race-proof team formation service for Hack4Hack Crew Hiring Challenge 2026 (PS1)",
   "engines": {
@@ -23,8 +23,9 @@
     "test:sse": "npm run test:sse --workspace=@crewmesh/api",
     "test:suggestions": "npm run test:suggestions --workspace=@crewmesh/api",
     "test:scale": "npm run test:scale --workspace=@crewmesh/api",
+    "test:hardening": "npm run test:hardening --workspace=@crewmesh/api",
     "test:e2e": "npm run test:e2e --workspace=@crewmesh/web",
-    "test:unit:sandbox": "node --test apps/api/test/phase1.unit.test.mjs apps/api/test/batch2.unit.test.mjs apps/api/test/batch3.unit.test.mjs apps/api/test/batch4.unit.test.mjs apps/api/test/batch5.unit.test.mjs apps/api/test/batch6.unit.test.mjs",
+    "test:unit:sandbox": "node --test apps/api/test/phase1.unit.test.mjs apps/api/test/batch2.unit.test.mjs apps/api/test/batch3.unit.test.mjs apps/api/test/batch4.unit.test.mjs apps/api/test/batch5.unit.test.mjs apps/api/test/batch6.unit.test.mjs apps/api/test/batch7.unit.test.mjs",
     "db:migrate": "npm run db:migrate --workspace=@crewmesh/api",
     "db:migrate:down": "npm run db:migrate:down --workspace=@crewmesh/api",
     "db:seed": "npm run db:seed --workspace=@crewmesh/api",

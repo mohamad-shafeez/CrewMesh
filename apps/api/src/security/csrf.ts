@@ -21,7 +21,7 @@ export function extractNormalizedOrigin(headerValue: string | undefined): string
 
 /**
  * Validates that a state-changing request originates from the configured APP_ORIGIN
- * (or the same host in same-origin production deployments).
+ * (supporting comma-separated origins in APP_ORIGIN and local loopback hosts in non-production).
  */
 export function isAllowedOrigin(
   originHeader: string | undefined,
@@ -30,13 +30,21 @@ export function isAllowedOrigin(
   requestHostHeader?: string,
 ): boolean {
   const allowedOrigins = new Set<string>();
-  const normalizedAppOrigin = extractNormalizedOrigin(configuredAppOrigin);
-  if (normalizedAppOrigin) {
-    allowedOrigins.add(normalizedAppOrigin);
+  for (const rawOrigin of configuredAppOrigin.split(',')) {
+    const normalized = extractNormalizedOrigin(rawOrigin.trim());
+    if (normalized) {
+      allowedOrigins.add(normalized);
+    }
   }
-  if (requestHostHeader) {
-    allowedOrigins.add(`http://${requestHostHeader}`);
-    allowedOrigins.add(`https://${requestHostHeader}`);
+
+  // Only allow dynamic requestHostHeader fallback on local loopback addresses in non-production
+  if (
+    requestHostHeader &&
+    process.env.NODE_ENV !== 'production' &&
+    /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(requestHostHeader.trim())
+  ) {
+    allowedOrigins.add(`http://${requestHostHeader.trim()}`);
+    allowedOrigins.add(`https://${requestHostHeader.trim()}`);
   }
 
   const candidateOrigin =
