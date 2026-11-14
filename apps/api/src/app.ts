@@ -73,7 +73,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     fs.existsSync(webIndexHtml);
 
   if (shouldServeStaticWeb) {
-    app.setNotFoundHandler(async (request, reply) => {
+    app.get("/*", async (request, reply) => {
       if (request.method !== 'GET' && request.method !== 'HEAD') {
         return reply.status(404).send({
           error: {
