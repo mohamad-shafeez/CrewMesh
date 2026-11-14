@@ -101,9 +101,12 @@ test.describe('Batches 4 & 5 — CrewMesh Real End-to-End PostgreSQL + SSE + Tea
       .fill('typescript, postgresql, rust, redis');
     await leaderPage.getByRole('button', { name: 'Save Desired Skills' }).click();
     await expect(leaderPage.getByText('Team desired skills updated.')).toBeVisible();
-    await expect(leaderPage.getByTestId('suggested-teammate-card').first()).toContainText(
-      `MemberOne ${runId}`,
-    );
+    await expect(
+      leaderPage
+        .getByTestId('suggested-teammate-card')
+        .filter({ hasText: `MemberOne ${runId}` })
+        .first(),
+    ).toBeVisible();
 
     // Non-leader visiting team detail page must NOT see Suggested Teammates panel
     await m1Page.goto(teamDetailUrl);
