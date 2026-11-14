@@ -141,7 +141,7 @@ test.describe('Batches 4 & 5 — CrewMesh Real End-to-End PostgreSQL + SSE + Tea
     await m2Page.getByRole('button', { name: 'Create Participant Account' }).click();
 
     await m2Page.getByRole('button', { name: 'Have an Invite Code?' }).click();
-    await m2Page.getByLabel('Invitation Code').fill(rawInviteCode);
+    await m2Page.locator('#board-invite-code').fill(rawInviteCode);
     await m2Page.getByRole('button', { name: 'Submit Join Request with Invite Code' }).click();
     await expect(m2Page.getByText(/Pending join request created!/)).toBeVisible();
 
