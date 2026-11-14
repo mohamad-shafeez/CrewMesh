@@ -134,7 +134,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     const ipLimit = await consumeRateLimitBucket({
       scope: 'auth_ip',
       identifier: `register:${request.ip}`,
-      limit: 20,
+      limit: env.RATE_LIMIT_REGISTER_PER_MIN,
       windowSeconds: 60,
     });
     if (!ipLimit.allowed) {

@@ -30,6 +30,7 @@ const envSchema = z
       ),
     DATABASE_SSL: z.enum(['disable', 'require', 'verify-full']).default('disable'),
     DB_POOL_MAX: z.coerce.number().int().min(2).max(200).default(25),
+    RATE_LIMIT_REGISTER_PER_MIN: z.coerce.number().int().min(1).max(100000).default(20),
     SESSION_COOKIE_NAME: z
       .string()
       .min(3)
