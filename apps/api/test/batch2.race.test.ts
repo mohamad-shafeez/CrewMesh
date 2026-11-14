@@ -8,98 +8,64 @@ import type {
   TeamDetailsDto,
 } from '@crewmesh/shared';
 import { buildApp } from '../src/app.js';
-import { getEnv, resetEnvCache } from '../src/config/env.js';
+import { resetEnvCache } from '../src/config/env.js';
 import { runMigrationsUp } from '../src/db/migrate.js';
 import { closeDbPool, getDbPool } from '../src/db/pool.js';
 import { seedHackathon } from '../src/db/seed.js';
-import { deriveCsrfToken, generateOpaqueToken, hashPassword, sha256Hex } from '../src/security/crypto.js';
 
-const TEST_OR/**
- * Test-only fixture: creates an authenticated participant directly in PostgreSQL.
- * This avoids the public registration IP rate limit during high-volume race setup.
- */
-let cachedRacePasswordHash: string | null = null;
+const TEST_ORIGIN = 'http://localhost:5173';
 
-async function createAuthenticatedUser(
-  hackathonId: string,
-  index: number,
-): Promise<RaceActor> {
-  const pool = getDbPool();
-  const env = getEnv();
-  const email = `racer_${index}_${crypto.randomUUID().slice(0, 8)}@example.com`;
-
-  if (!cachedRacePasswordHash) {
-    cachedRacePasswordHash = await hashPassword('RaceTestPassword!2026');
-  }
-
-  const rawToken = generateOpaqueToken(32);
-  const tokenHash = sha256Hex(rawToken);
-  const csrfToken = deriveCsrfToken(tokenHash, env.CSRF_SECRET);
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    const userResult = await client.query<{ id: string }>(
-      `
-      INSERT INTO users (
-        email, password_hash, display_name, skills,
-        timezone, timezone_confirmed_at, bio
-      )
-      VALUES ($1, $2, $3, $4, 'UTC', NOW(), '')
-      RETURNING id
-      `,
-      [
-        email,
-        cachedRacePasswordHash,
-        `Racer ${index}`,
-        ['typescript', 'postgresql'],
-      ],
-    );
-
-    const userId = userResult.rows[0]!.id;
-
-    await client.query(
-      `
-      INSERT INTO hackathon_participants (hackathon_id, user_id, status)
-      VALUES ($1, $2, 'registered')
-      `,
-      [hackathonId, userId],
-    );
-
-    await client.query(
-      `
-      INSERT INTO sessions (
-        user_id, token_hash, csrf_token_hash,
-        ip_address, user_agent, expires_at
-      )
-      VALUES ($1, $2, $3, '127.0.0.1', 'crewmesh-race-fixture',
-              NOW() + ($4::int * INTERVAL '1 second'))
-      `,
-      [
-        userId,
-        tokenHash,
-        sha256Hex(csrfToken),
-        env.SESSION_TTL_HOURS * 3600,
-      ],
-    );
-
-    await client.query('COMMIT');
-
-    return {
-      userId,
-      cookie: `${env.SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}`,
-      csrfToken,
-    };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
+interface RaceActor {
+  userId: string;
+  cookie: string;
+  csrfToken: string;
 }
 
-body.user.id,
+function extractCookieValue(
+  setCookieHeader: string | string[] | undefined,
+  cookieName: string,
+): string | null {
+  if (!setCookieHeader) {
+    return null;
+  }
+  const headers = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+  for (const header of headers) {
+    const firstPart = header.split(';')[0]?.trim() ?? '';
+    const [name, val] = firstPart.split('=');
+    if (name === cookieName && val !== undefined) {
+      return decodeURIComponent(val);
+    }
+  }
+  return null;
+}
+
+async function createAuthenticatedUser(
+  app: FastifyInstance,
+  index: number,
+): Promise<RaceActor> {
+  const email = `racer_${index}_${crypto.randomUUID().slice(0, 8)}@example.com`;
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/v1/auth/register',
+    headers: { origin: TEST_ORIGIN },
+    payload: {
+      email,
+      password: 'RaceTestPassword!2026',
+      displayName: `Racer ${index}`,
+      skills: ['typescript', 'postgresql'],
+      timezone: 'UTC',
+    },
+  });
+
+  if (res.statusCode !== 201) {
+    throw new Error(`Failed to register racer ${index}: ${res.body}`);
+  }
+
+  const token = extractCookieValue(res.headers['set-cookie'], 'crewmesh_session');
+  const body = res.json<{ user: { id: string }; csrfToken: string }>();
+
+  return {
+    userId: body.user.id,
     cookie: `crewmesh_session=${encodeURIComponent(token!)}`,
     csrfToken: body.csrfToken,
   };
@@ -114,6 +80,7 @@ describe('Batch 2 & 3 — 50-Way Last-Seat Concurrency & Invite Use-Limit Race P
     process.env.APP_ORIGIN = TEST_ORIGIN;
     process.env.CSRF_SECRET = 'race_test_csrf_secret_with_at_least_32_bytes_entropy_012345';
     process.env.HACKATHON_DEADLINE_ISO = '';
+    process.env.RATE_LIMIT_REGISTER_PER_MIN = '1000';
     process.env.DATABASE_URL =
       process.env.TEST_DATABASE_URL ??
       process.env.DATABASE_URL ??
@@ -162,7 +129,7 @@ describe('Batch 2 & 3 — 50-Way Last-Seat Concurrency & Invite Use-Limit Race P
       [hackathonId],
     );
 
-    const leader = await createAuthenticatedUser(hackathonId, 0);
+    const leader = await createAuthenticatedUser(app, 0);
 
     const createTeamRes = await app.inject({
       method: 'POST',
@@ -186,7 +153,7 @@ describe('Batch 2 & 3 — 50-Way Last-Seat Concurrency & Invite Use-Limit Race P
     const requestIds: string[] = [];
 
     for (let i = 1; i <= applicantCount; i += 1) {
-      const applicant = await createAuthenticatedUser(hackathonId, i);
+      const applicant = await createAuthenticatedUser(app, i);
       const jrRes = await app.inject({
         method: 'POST',
         url: `/api/v1/teams/${teamId}/join-requests`,
@@ -274,7 +241,7 @@ describe('Batch 2 & 3 — 50-Way Last-Seat Concurrency & Invite Use-Limit Race P
       [hackathonId],
     );
 
-    const leader = await createAuthenticatedUser(hackathonId, 100);
+    const leader = await createAuthenticatedUser(app, 100);
     const teamId = (
       await app.inject({
         method: 'POST',
@@ -312,7 +279,7 @@ describe('Batch 2 & 3 — 50-Way Last-Seat Concurrency & Invite Use-Limit Race P
 
     const contenders: RaceActor[] = [];
     for (let i = 1; i <= 20; i += 1) {
-      contenders.push(await createAuthenticatedUser(hackathonId, 200 + i));
+      contenders.push(await createAuthenticatedUser(app, 200 + i));
     }
 
     const redeemResponses = await Promise.all(
