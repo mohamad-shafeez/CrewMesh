@@ -2,6 +2,7 @@
 -- CrewMesh — Migration 005 Down: Rollback Scale & Time-Zone Provenance Changes
 -- ============================================================================
 
+DROP INDEX IF EXISTS idx_teams_hackathon_created_id_cursor;
 DROP INDEX IF EXISTS idx_teams_hackathon_open_capacity_cursor;
 
 DROP TABLE IF EXISTS hackathon_participants;

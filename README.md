@@ -6,30 +6,11 @@
 
 **Race-proof team formation for hackathons.** When hundreds of people click "join" at the same second, exactly one gets the last seat.
 
-
-![CI](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml/badge.svg)
-
-(https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml)
-
-
-![Live](https://img.shields.io/badge/live-crewmesh.onrender.com-1F8A63)
-
-
-
-
+[![CI](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml/badge.svg)](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml)
+[![Live](https://img.shields.io/badge/live-crewmesh.onrender.com-1F8A63)](https://crewmesh.onrender.com)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)
-
-
-
-
 ![TypeScript](https://img.shields.io/badge/TypeScript-Fastify%20%2B%20React-3178C6)
-
-
-
-
 ![Tests](https://img.shields.io/badge/tests-45%20integration%20%7C%2057%20unit%20%7C%20E2E-success)
-
-
 
 **[Live app](https://crewmesh.onrender.com)** · **[Design doc](docs/DESIGN.md)** · **[CI runs](https://github.com/mohamad-shafeez/CrewMesh/actions)** · **[Lock order](docs/transaction-lock-order.md)**
 
@@ -195,7 +176,7 @@ Only people registered for the hackathon are considered.
 | Playwright E2E, desktop and 390 px mobile | 1 flow, 2 viewports | GitHub Actions |
 | Lint, typecheck, production build | all workspaces | GitHub Actions |
 
-Some integration tests cover several numbered scenarios each, so the scenario count is higher than the test count. The hardening and race tests are also part of the 45 integration figure's neighbouring suites; the table lists each suite by its own npm script.
+Some integration tests cover several numbered scenarios each, so the scenario count is higher than the test count.
 
 ### Scale and load
 

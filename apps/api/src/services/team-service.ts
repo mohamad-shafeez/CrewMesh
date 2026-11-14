@@ -414,6 +414,8 @@ export async function getTeamByIdOrThrow(
 /**
  * Queries the public team board with keyset/cursor pagination and filters (no N+1 queries).
  */
+let cachedBoardHackathon: { ref: string; row: HackathonRow; exp: number } | null = null;
+
 export async function listTeamBoard(
   params: {
     hackathonIdOrSlug: string;
@@ -427,7 +429,14 @@ export async function listTeamBoard(
   },
   db: Queryable = getDbPool(),
 ): Promise<TeamBoardPageResponse> {
-  const hackathon = await resolveHackathonOrThrow(params.hackathonIdOrSlug, db);
+  const ref = params.hackathonIdOrSlug.trim();
+  let hackathon: HackathonRow;
+  if (cachedBoardHackathon && cachedBoardHackathon.ref === ref && cachedBoardHackathon.exp > Date.now()) {
+    hackathon = cachedBoardHackathon.row;
+  } else {
+    hackathon = await resolveHackathonOrThrow(ref, db);
+    cachedBoardHackathon = { ref, row: hackathon, exp: Date.now() + 2000 };
+  }
   const pageSize = Math.min(Math.max(params.limit ?? 20, 1), 50);
 
   const conditions: string[] = ['t.hackathon_id = $1'];

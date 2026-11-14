@@ -132,7 +132,7 @@ jobs:
       DATABASE_URL: postgresql://crewmesh:crewmesh_ci_loadtest_password@localhost:5432/crewmesh_loadtest
       TEST_DATABASE_URL: postgresql://crewmesh:crewmesh_ci_loadtest_password@localhost:5432/crewmesh_loadtest
       CREWMESH_ALLOW_SCALE_SEED: 'true'
-      DB_POOL_MAX: 40
+      DB_POOL_MAX: 80
 
     services:
       postgres:

@@ -118,3 +118,6 @@ ON CONFLICT (hackathon_id, user_id) DO NOTHING;
 CREATE INDEX IF NOT EXISTS idx_teams_hackathon_open_capacity_cursor
   ON teams (hackathon_id, created_at DESC, id DESC)
   WHERE member_count < max_team_size;
+
+CREATE INDEX IF NOT EXISTS idx_teams_hackathon_created_id_cursor
+  ON teams (hackathon_id, created_at DESC, id DESC);
