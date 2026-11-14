@@ -1,183 +1,233 @@
+<div align="center">
+
 # CrewMesh
 
-**Find your people. Build your team.**  
-*Hack4Hack Crew Hiring Challenge 2026 — Problem Statement 1 (PS1): Race-proof team formation at scale*
+### Find your people. Build your team.
 
-> **Live Production Deployment**: [crewmesh.onrender.com](https://crewmesh.onrender.com) · **Readiness Probe**: [/ready](https://crewmesh.onrender.com/ready) · **Health Check**: [/healthz](https://crewmesh.onrender.com/healthz) · **Source Repository**: [github.com/mohamad-shafeez/CrewMesh](https://github.com/mohamad-shafeez/CrewMesh)
+**Race-proof team formation for hackathons.** When hundreds of people click "join" at the same second, exactly one gets the last seat.
+
+[
+
+![CI](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml/badge.svg)
+
+](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml)
+
+
+![Live](https://img.shields.io/badge/live-crewmesh.onrender.com-1F8A63)
+
+
+
+
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)
+
+
+
+
+![TypeScript](https://img.shields.io/badge/TypeScript-Fastify%20%2B%20React-3178C6)
+
+
+
+
+![Tests](https://img.shields.io/badge/tests-45%20integration%20%7C%2057%20unit%20%7C%20E2E-success)
+
+
+
+**[Live app](https://crewmesh.onrender.com)** · **[Design doc](docs/DESIGN.md)** · **[CI runs](https://github.com/mohamad-shafeez/CrewMesh/actions)** · **[Lock order](docs/transaction-lock-order.md)**
+
+*Hack4Hack Crew Hiring Challenge 2026, Problem Statement 1 (PS1)*
+
+</div>
+
+> The live app runs on Render's free tier, so the first request after a quiet period can take about 50 seconds while the server wakes up.
 
 ---
 
-## 1. Why CrewMesh Exists (Problem Statement 1)
+## The proof in 30 seconds
 
-During high-concurrency hackathon launches, hundreds of participants simultaneously create teams, send join requests, redeem invitation codes, and accept members into the last open seat on a team. Application-layer "read-then-write" checks fail under burst concurrency.
+| Scenario | Result | Test |
+|---|---|---|
+| 50 simultaneous accepts for the **last seat** of a team | **1 success, 49 clean `TEAM_FULL` conflicts** | [`batch2.race.test.ts`](apps/api/test/batch2.race.test.ts) |
+| 20 simultaneous redemptions of an invite code with `maxUses = 3` | **Exactly 3 pending requests** | [`batch2.race.test.ts`](apps/api/test/batch2.race.test.ts) |
+| Two leaders accept the **same person** into two teams at once (5 rounds) | **Exactly one team wins, never two** | [`batch7.hardening.integration.test.ts`](apps/api/test/batch7.hardening.integration.test.ts) |
+| Same request retried or double-clicked with one `Idempotency-Key` | **One result, replayed** | [`batch2.integration.test.ts`](apps/api/test/batch2.integration.test.ts) |
 
-**CrewMesh** pushes every membership, capacity, leadership, and event-ordering guarantee directly into **PostgreSQL 16 constraints, `DEFERRABLE INITIALLY DEFERRED` constraint triggers, deterministic row-level lock ordering (`FOR SHARE` / `FOR UPDATE`), and an advisory-locked transactional outbox (`pg_advisory_xact_lock`)**, paired with an explainable skill and IANA time-zone recommendation engine (`crewmesh-match-v1`) and a single-origin React 18 interface.
-
-| Concurrency Failure Mode | What Breaks in Naive Apps | How CrewMesh Prevents It in PostgreSQL 16 |
-| :--- | :--- | :--- |
-| **Last-Seat Overbooking** | Two leaders/requests pass `member_count < max_team_size` simultaneously and push the team over capacity. | `SELECT ... FOR UPDATE` on `teams` + `CHECK (member_count BETWEEN 1 AND max_team_size)` + deferred commit-time trigger verifying `member_count = COUNT(team_members)`. |
-| **Split-Brain Multi-Team Membership** | A participant is accepted into Team A and Team B in parallel transactions. | `acceptJoinRequestTx` locks `hackathon_participants` `FOR UPDATE` before `join_requests`, backed by `UNIQUE (hackathon_id, user_id)` on `team_members` and automatic sibling request cancellation. |
-| **Orphaned or Leaderless Teams** | Leader departure or concurrent removals leave `0` leaders or `2` leaders. | Partial unique index `idx_team_members_single_leader` (`WHERE role = 'leader'`) + deferred trigger `trg_enforce_team_integrity` enforcing exactly one leader at `COMMIT`. |
-| **Out-of-Order or Leaked Live Events** | SSE notifications fire before commit, arrive out of sequence, or leak private applicant/invite fields. | `outbox_events` sequence allocation is serialized under `pg_advisory_xact_lock(842026002)` at commit boundary, dispatched via `LISTEN/NOTIFY` with strict per-event public field allowlists. |
+These run in GitHub Actions against a **real PostgreSQL 16**, not mocks.
 
 ---
 
-## 2. Live Deployment & Production Architecture
+## Requirement checklist (PS1)
 
-CrewMesh runs in production under a unified single-origin architecture so `HttpOnly; Secure; SameSite=Lax` session cookies, HMAC-SHA256 CSRF `Origin` validation, and native `EventSource` SSE streams operate without cross-origin preflight overhead.
+| PS1 requirement | Status | How |
+|---|---|---|
+| Team size min/max, one team per person, expiring invite codes, leadership handover, empty team deleted | ✅ | `teams_member_count_bounds_chk`, `team_members_one_team_per_hackathon_unique`, invite default expiry 48 h, deterministic leader succession |
+| Race-proof last seat, proven by an automated concurrency test | ✅ | Row lock plus constraints; 50-way test in CI |
+| Idempotent retries | ✅ | `Idempotency-Key` stored 24 h; same key with a different payload returns `409 IDEMPOTENCY_KEY_REUSED` |
+| Real-time board and team pages | ✅ | Server-Sent Events fed by a transactional outbox |
+| Secure: auth, leader-only actions, brute-force-resistant invites, validated input | ✅ | See [Security](#security) |
+| Audit log of every team change (who, what, when) | ✅ | `audit_log` written in the same transaction as the change |
+| Teammate suggestions with explained scoring | ✅ | `GET /api/v1/teams/:teamId/suggestions` |
+| 20+ API tests incl. race test, in CI | ✅ | 45 integration tests, 57 unit tests, Playwright E2E |
+| Seed 10,000 users and 2,000 teams; k6 load test | ✅ | `npm run db:seed:scale`, `npm run bench:board:k6` |
+| React UI for the whole flow, works on a phone | ✅ | Tested at 390 px and 360 px viewports |
+| Deployed on a free tier | ✅ | [crewmesh.onrender.com](https://crewmesh.onrender.com) |
+| Bonus: optimistic UI, tracing or metrics, chaos test | ❌ | Not done. See [Honest limits](#honest-limits-and-what-id-do-next) |
+| Bonus: Docker Compose | ◐ | Starts PostgreSQL only, not the full app |
 
-| Layer | Production Stack | Live Endpoint / Configuration |
-| :--- | :--- | :--- |
-| **Web & API Runtime** | Fastify 4 + React 18 SPA (`SERVE_WEB_DIST=true`, `TRUST_PROXY=true`) on [Render](https://render.com/docs/free) (`Singapore`) | [https://crewmesh.onrender.com](https://crewmesh.onrender.com) |
-| **Database Engine** | [Neon PostgreSQL 16](https://neon.com/pricing) (`AWS ap-southeast-1`, Direct TLS connection with pooling disabled for `LISTEN/NOTIFY`) | Migrations `001`–`007` applied; `hack4hack-crew-2026` seeded |
-| **Database Readiness** | Live `SELECT 1` + latency probe | [https://crewmesh.onrender.com/ready](https://crewmesh.onrender.com/ready) |
-| **Liveness Probe** | Zero-DB process health check (monitored via [UptimeRobot](https://uptimerobot.com/)) | [https://crewmesh.onrender.com/healthz](https://crewmesh.onrender.com/healthz) |
+---
 
-```text
-Browser (React 18 + Vite 5 SPA + Native EventSource)
-   │  Same-Origin HTTPS (Cookie: crewmesh_session + X-CSRF-Token + Idempotency-Key)
-   ▼
-Fastify 4 API Server (@crewmesh/api)
-   ├── Mutating Routes (/api/v1/teams, /join-requests, /invites)
-   │     └── PostgreSQL 16 Transaction (withTransaction)
-   │           1. Lock idempotency_keys (FOR UPDATE)
-   │           2. Lock teams (FOR UPDATE)
-   │           3. Lock hackathon_participants (FOR SHARE / FOR UPDATE)
-   │           4. Mutate team_members / join_requests / invite_codes
-   │           5. Acquire pg_advisory_xact_lock(842026002) -> Insert outbox_events + audit_log
-   │           6. COMMIT -> Deferred triggers validate invariants -> pg_notify('crewmesh_outbox')
-   │
-   └── Real-Time SSE Dispatcher (/api/v1/hackathons/:slug/events & /teams/:teamId/events)
-         └── Dedicated PG LISTEN Connection + 500-Row Paginated Catch-Up Replay + Allowlist Projection
+## Architecture
+
+```mermaid
+flowchart LR
+  B["Browser<br/>React 18 + EventSource"] -->|"HTTPS, session cookie,<br/>CSRF token, Idempotency-Key"| A["Fastify 4 API<br/>(also serves the SPA)"]
+  A -->|"one transaction per change"| P[("PostgreSQL 16")]
+  P -->|"after COMMIT: NOTIFY"| S["SSE dispatcher<br/>(LISTEN)"]
+  S -->|"live events"| B
 ```
 
----
+One service serves both the API and the built web app on a single origin, so cookies stay `HttpOnly; Secure; SameSite=Lax` and CSRF checks stay strict.
 
-## 3. Core Engineering Capabilities
+### How the last seat is protected
 
-- **Race-Proof Team Lifecycle (`apps/api/src/services/team-service.ts`)**:
-  - Teams require `2`–`5` members (`min_team_size = 2`, `max_team_size = 5`). Teams below minimum capacity persist as `'forming'` and automatically transition to `'ready'` once `member_count >= min_team_size` (with `isFull: true` when `member_count = max_team_size`).
-  - Every join path—whether via public board join request or 8-character cryptographic invitation code—creates a pending join request requiring explicit team leader approval.
-  - If the sole remaining member leaves a team, the team is cleanly dissolved in the same transaction; if a leader leaves a multi-member team, leadership must be transferred first.
-- **Explainable Teammate Matching (`crewmesh-match-v1`)**:
-  - Scores candidate teams and participants deterministically (`55%` skill coverage + `30%` IANA time-zone compatibility + `15%` role & availability alignment) without opaque black-box embeddings.
-  - Computes real UTC offset deltas from validated IANA time zones (e.g., `Asia/Kolkata`, `America/New_York`) and returns human-readable match reasons plus structured breakdown percentages.
-- **Defense-in-Depth Security (`apps/api/src/security/`)**:
-  - **Argon2id** password hashing (`memoryCost: 19456 KiB`, `timeCost: 2`, `parallelism: 1`).
-  - **Opaque 256-bit sessions** stored as SHA-256 digests in PostgreSQL (`sessions.token_hash`), never raw tokens.
-  - **Stateless HMAC-SHA256 CSRF tokens** bound to the session hash and verified with `crypto.timingSafeEqual` alongside strict `Origin` header validation.
-  - **Transactional Idempotency (`Idempotency-Key`)** with SHA-256 canonical payload fingerprinting so network retries never duplicate mutations.
-
----
-
-## 4. Verification & Execution Status Matrix
-
-To maintain strict engineering transparency, the matrix below separates what is **implemented in source**, what was **executed in the isolated local sandbox**, what is **wired in GitHub Actions CI**, and what is **live in production**:
-
-| Subsystem / Verification Suite | Implementation Status | Local Sandbox Status | CI / Production Status | Evidence & Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| **Monorepo AST & Architecture Verification (`npm run verify:sandbox`)** | **Implemented** | **Executed & Passed (`62 / 62` `.ts`/`.tsx` files)** | Verified in repo | Transpiles all 62 TypeScript/TSX modules and validates migrations `001`–`007`, routes, and shared Zod schemas. |
-| **Isolated Unit & Invariant Suite (`npm run test:unit:sandbox`)** | **Implemented** | **Executed & Passed (`57 / 57` tests across Batches 1–9)** | Runs in [GitHub Actions CI](https://github.com/mohamad-shafeez/CrewMesh/actions) | Executes real production TypeScript modules via `scripts/ts-loader.mjs` (Argon2id, CSRF, cursors, recursive metadata sanitization, SSE allowlist projection, `> 500`-event SSE replay, `crewmesh-match-v1` scoring, 10k/2k scale generator, and SSL config). |
-| **ESLint Script & Test Linting (`npm run lint:scripts`)** | **Implemented** | **Executed & Passed (`0` errors, `0` warnings)** | Full `npm run lint` in CI | Uses `espree` for `.js`/`.mjs` and `@typescript-eslint/parser` for `.ts`/`.tsx` without silent fallback. |
-| **Root `package-lock.json` & `npm ci`** | **Implemented** | Generated & verified (`320` packages) | **Executed in CI & Render Build** | Committed to [CrewMesh `main`](https://github.com/mohamad-shafeez/CrewMesh) and verified via `npm ci --include=dev`. |
-| **TypeScript `tsc --noEmit` & Production Build (`npm run build`)** | **Implemented** | Verified via AST loader locally | **Executed & Passed on Render & CI** | Builds `@crewmesh/shared`, `@crewmesh/api`, and `@crewmesh/web` production bundles cleanly. |
-| **PostgreSQL 16 Integration & Hardening (`npm run test:integration`, `npm run test:hardening`)** | **Implemented** | Requires PostgreSQL 16 daemon | Configured in `.github/workflows/ci.yml` (`postgres:16-alpine`) | Covers `phase1`, `batch2`, `batch3.sse`, `batch5.suggestions`, `scale-seed`, and `batch7.hardening` integration suites. |
-| **50-Way Last-Seat & Invite Race Suite (`npm run test:race`)** | **Implemented** | Requires PostgreSQL 16 daemon | Configured in `.github/workflows/ci.yml` | Fires 50 barrier-synchronized transactions against 1 remaining team slot; asserts `1` winner (`200`) and `49` deterministic `409` rejections. |
-| **Playwright Desktop & Mobile E2E (`npm run test:e2e`)** | **Implemented** | Requires Chromium + PostgreSQL 16 | Configured in `.github/workflows/ci.yml` | Tests registration, team creation, invite redemption, leader approval, live SSE updates, and `360px`/`390px` mobile viewports. |
-| **10k Participant / 2k Team Scale Seed & 100-VU k6 Benchmark (`npm run db:seed:scale`, `npm run bench:board:k6`)** | **Implemented** | Generator verified in memory (`57/57` unit tests) | Configured in `.github/workflows/ci.yml` (`scale-and-k6-benchmark`) | **Target**: `p(95) < 200 ms`, error rate `< 1%` at `100` VUs for `60s` (`apps/api/load/board.k6.js`). |
-| **Live Production Deployment** | **Deployed & Live** | N/A | **Live at [crewmesh.onrender.com](https://crewmesh.onrender.com)** | Hosted on Render (Free Web Service) + Neon PostgreSQL 16 (Singapore) with migrations `001`–`007` and `hack4hack-crew-2026` seeded. |
-
----
-
-## 5. Database Invariants & Deterministic Lock Hierarchy
-
-CrewMesh enforces seven sequential SQL migrations (`apps/api/migrations/001` through `007`):
-
-1. **`001_initial_schema.{up,down}.sql`**: Creates `users`, `sessions`, `hackathons`, `teams`, `team_members`, `join_requests`, `invite_codes`, `idempotency_keys`, `audit_log`, `outbox_events`, and `rate_limit_buckets`. Enforces `UNIQUE (hackathon_id, user_id)` on `team_members` so a participant can never belong to two teams in the same hackathon.
-2. **`002_team_engine_and_integrity.{up,down}.sql`**: Adds `DEFERRABLE INITIALLY DEFERRED` constraint triggers verifying at `COMMIT` time that every surviving team has `member_count = COUNT(team_members)`, `1 <= member_count <= max_team_size`, and **exactly one** member with `role = 'leader'`.
-3. **`003_nullable_deadline_and_outbox_notify.{up,down}.sql`**: Makes `hackathons.registration_deadline` nullable and adds `AFTER INSERT ON outbox_events` trigger issuing `pg_notify('crewmesh_outbox', ...)`.
-4. **`004_suggestions_and_preferences.{up,down}.sql`**: Adds `desired_skills TEXT[]` and `looking_for_members BOOLEAN` to `teams` with GIN and composite keyset indexes.
-5. **`005_scale_performance_and_timezone_provenance.{up,down}.sql`**: Adds `users.timezone_confirmed_at`, creates `hackathon_participants`, drops duplicate indexes from `004`, and creates covering keyset pagination indexes for the 2,000-team board.
-6. **`006_outbox_commit_order_and_participant_fk.{up,down}.sql`**: Serializes `outbox_events.id` allocation under `pg_advisory_xact_lock(842026002)` so outbox sequence IDs strictly match transaction commit order, and adds composite foreign keys from `teams`, `team_members`, and `join_requests` to `hackathon_participants(hackathon_id, user_id)`.
-7. **`007_strict_outbox_id_and_rate_limit_cleanup.{up,down}.sql`**: Rejects any caller-supplied `NEW.id IS NOT NULL` on `outbox_events` with `ERRCODE = '23514'` so sequence serialization cannot be bypassed.
-
-### Canonical Lock Order (`docs/transaction-lock-order.md`)
-Every mutating transaction acquires row and advisory locks in strict order to prevent deadlocks:
-1. `idempotency_keys` (`FOR UPDATE`)
-2. `teams` (`FOR UPDATE`)
-3. `hackathon_participants` (`FOR SHARE` for team/request/invite creation; `FOR UPDATE` in `acceptJoinRequestTx` before locking `join_requests` to serialize cross-team acceptances of the same applicant)
-4. `invite_codes` / `join_requests` / `team_members` (`FOR UPDATE`)
-5. `pg_advisory_xact_lock(842026002)` (allocated inside `BEFORE INSERT ON outbox_events`)
-
----
-
-## 6. Repository Structure
-
-```text
-CrewMesh/
-├── .env.example                      # Documented environment template (zero secrets)
-├── .eslintrc.js                      # Monorepo ESLint configuration (.ts, .tsx, .mjs)
-├── .github/workflows/ci.yml          # GitHub Actions workflow (PostgreSQL 16, Playwright, k6)
-├── docker-compose.yml                # Local PostgreSQL 16 service definition
-├── package.json                      # Root npm workspace manifest & scripts
-├── packages/
-│   └── shared/                       # @crewmesh/shared — Zod DTO schemas, canonical JSON, types
-├── apps/
-│   ├── api/                          # @crewmesh/api — Fastify 4 + PostgreSQL 16 backend
-│   │   ├── migrations/               # SQL migrations 001..007 (.up.sql & .down.sql)
-│   │   ├── load/board.k6.js          # Grafana k6 100-VU board load test (scenario-tagged metrics)
-│   │   ├── src/
-│   │   │   ├── config/env.ts         # Fail-fast Zod environment & production safety validator
-│   │   │   ├── db/                   # Pool (with TLS support), migration CLI, seed & 10k/2k scale seeder
-│   │   │   ├── plugins/              # Session hydration, security headers, structured error envelope
-│   │   │   ├── routes/               # /health, /healthz, /ready, auth, teams, join-requests, invites, SSE
-│   │   │   ├── security/             # Argon2id, SHA-256 sessions, HMAC CSRF, PostgreSQL rate limiter
-│   │   │   └── services/             # Team engine, join requests, invites, SSE dispatcher, suggestions
-│   │   └── test/                     # Unit (.mjs) + PostgreSQL integration & 50-way race (.ts) suites
-│   └── web/                          # @crewmesh/web — React 18 + Vite 5 frontend
-│       ├── e2e/crewmesh.spec.ts      # Playwright desktop & mobile E2E test suite
-│       └── src/                      # Pages, components, SSE hooks, and logical idempotency client
-├── docs/
-│   ├── deployment-architecture.md    # Same-origin production validation & zero-cost hosting guide
-│   ├── transaction-lock-order.md     # Deterministic PostgreSQL lock hierarchy
-│   └── workspace-script-matrix.md    # Complete audit of all npm scripts across workspaces
-├── infra/postgres/
-│   └── init-test-db.sql              # Docker initialization script for crewmesh_test & crewmesh_loadtest
-├── reports/load-test/
-│   └── benchmark-environment.md      # k6 benchmark target, dataset specification & status
-└── scripts/
-    ├── healthcheck.mjs               # CLI health & readiness probe
-    ├── ts-loader.mjs                 # Portable TypeScript/TSX loader for isolated Node unit tests
-    └── verify-sandbox.mjs            # Static AST & architecture verifier across all 62 .ts/.tsx files
+```mermaid
+sequenceDiagram
+  participant R1 as Request 1
+  participant R50 as Request 50
+  participant API as Fastify
+  participant DB as PostgreSQL
+  R1->>API: accept
+  R50->>API: accept
+  API->>DB: BEGIN, SELECT team FOR UPDATE
+  Note over DB: One transaction holds the team lock,<br/>the others wait their turn
+  DB-->>API: seat taken, member_count = max
+  API-->>R1: 200 accepted
+  API->>DB: next transaction gets the lock
+  DB-->>API: team is full
+  API-->>R50: 409 TEAM_FULL
 ```
 
+The application never trusts "read the count, then write". The database decides.
+
 ---
 
-## 7. Local Setup, Build & Verification Commands
+## Guarantees enforced by PostgreSQL
 
-### Prerequisites
-- **Node.js** `>= 18.18.0` (Node 20 LTS recommended) and **npm** `>= 9.0.0`
-- **PostgreSQL 16** (`docker compose up -d postgres` or local PostgreSQL 16 instance)
+| Rule | Mechanism |
+|---|---|
+| One team per person per hackathon | `UNIQUE (hackathon_id, user_id)` named `team_members_one_team_per_hackathon_unique` |
+| Exactly one leader per team | Unique index `idx_team_members_one_leader_per_team` |
+| Team size between min and max | `teams_member_count_bounds_chk` |
+| Stored `member_count` equals the real member count | `DEFERRABLE INITIALLY DEFERRED` constraint triggers `trg_teams_verify_integrity` and `trg_team_members_verify_integrity`, checked at **COMMIT** |
+| Live events arrive in commit order | `trg_outbox_events_serialize_id` takes `pg_advisory_xact_lock(842026002)` before assigning the event id |
+| Callers cannot forge event ids | Migration 007 rejects explicit ids |
 
-### Step-by-Step Clean-Checkout Commands
+### Lock order (prevents deadlocks)
+
+Every mutating transaction takes locks in this order. Details in [`docs/transaction-lock-order.md`](docs/transaction-lock-order.md).
+
+1. `idempotency_keys`
+2. `teams`
+3. `hackathon_participants`
+4. `invite_codes`, `join_requests`, `team_members`
+5. Advisory lock inside the outbox insert trigger
+
+---
+
+## Data model
+
+```mermaid
+erDiagram
+  USERS ||--o{ HACKATHON_PARTICIPANTS : "registers as"
+  HACKATHONS ||--o{ HACKATHON_PARTICIPANTS : has
+  HACKATHONS ||--o{ TEAMS : hosts
+  TEAMS ||--o{ TEAM_MEMBERS : has
+  USERS ||--o| TEAM_MEMBERS : "in at most one team"
+  TEAMS ||--o{ JOIN_REQUESTS : receives
+  TEAMS ||--o{ INVITE_CODES : issues
+  USERS ||--o{ SESSIONS : owns
+```
+
+Supporting tables: `idempotency_keys`, `audit_log`, `outbox_events`, `rate_limit_buckets`. Seven migrations live in [`apps/api/migrations`](apps/api/migrations), each with an `up` and a `down`; CI applies them, rolls two back and re-applies.
+
+---
+
+## Security
+
+| Area | Implementation |
+|---|---|
+| Passwords | Argon2id, 64 MiB memory, 3 passes, parallelism 4 |
+| Sessions | Opaque 256-bit tokens; only the SHA-256 hash is stored |
+| CSRF | HMAC-SHA256 token bound to the session, compared in constant time, plus strict `Origin` check |
+| Authorization | Only the team leader can accept, decline or remove members; checked on the server |
+| Invite codes | 256-bit random, stored only as SHA-256, expire (48 h default), optional max uses |
+| Rate limits (PostgreSQL buckets) | Register 20/min per IP (`RATE_LIMIT_REGISTER_PER_MIN`), login 15/min per IP and 10/min per hashed email, invite redemption 60/min per IP and 15/min per user, suggestions 30/min per user |
+| Input | Every request body validated with Zod schemas shared with the frontend |
+| Live events | Public-field allowlist, so private applicant and invite data never leaks to subscribers |
+
+---
+
+## Real-time updates
+
+Mutations write an event into `outbox_events` inside the same transaction. After commit, a PostgreSQL trigger sends `NOTIFY`, and a dedicated `LISTEN` connection feeds Server-Sent Events to the board (`/api/v1/hackathons/:slug/events`) and to each team page (`/api/v1/teams/:teamId/events`). Clients that reconnect send `Last-Event-ID` and receive the events they missed, in order. A heartbeat every 15 seconds keeps proxies from closing idle streams.
+
+---
+
+## Teammate suggestions
+
+`GET /api/v1/teams/:teamId/suggestions` ranks people for a team and explains every score.
+
+- **70%** skill coverage: how many of the team's missing skills the candidate fills
+- **30%** time-zone compatibility: real UTC offsets computed from validated IANA zones
+- The response includes the breakdown percentages and human-readable reasons, for example which missing skills the person covers
+
+Only people registered for the hackathon are considered.
+
+---
+
+## Verification
+
+| Suite | Count | Where it runs |
+|---|---|---|
+| Unit and invariant tests (`npm run test:unit:sandbox`) | 57 | GitHub Actions |
+| PostgreSQL integration tests (`npm run test:integration`) | 45 | GitHub Actions, `postgres:16-alpine` |
+| 50-way race and invite-limit tests (`npm run test:race`) | 2 | GitHub Actions |
+| Hardening tests (`npm run test:hardening`) | 5 | GitHub Actions |
+| Frontend unit tests | 3 | GitHub Actions |
+| Playwright E2E, desktop and 390 px mobile | 1 flow, 2 viewports | GitHub Actions |
+| Lint, typecheck, production build | all workspaces | GitHub Actions |
+
+Some integration tests cover several numbered scenarios each, so the scenario count is higher than the test count. The hardening and race tests are also part of the 45 integration figure's neighbouring suites; the table lists each suite by its own npm script.
+
+### Scale and load
+
+- `npm run db:seed:scale` creates **10,000 participants, 2,000 teams and 7,000 memberships** in an isolated `*_loadtest` database and asserts every count with SQL (500 teams each of sizes 2 to 5).
+- `npm run bench:board:k6` runs **100 concurrent virtual users for 60 seconds** against the board endpoint, after a 10-second warm-up.
+- k6 enforces `p(95) < 200 ms`, failed requests `< 1%` and checks `> 99%`. The pipeline passes these thresholds in [GitHub Actions](https://github.com/mohamad-shafeez/CrewMesh/actions); the k6 summary is attached to each run as the `crewmesh-batch9-load-test-reports` artifact.
+- The benchmark runs on a shared GitHub runner and measures the read path (the board). It is not a test of write throughput.
+
+---
+
+## Run it locally
+
+Requires Node 18.18 or newer and PostgreSQL 16 (Docker is the easiest way).
+
 ```bash
-# 1. Install deterministic dependencies from package-lock.json
 npm ci
-
-# 2. Copy environment configuration and start PostgreSQL 16
 cp .env.example .env
-docker compose up -d postgres
+docker compose up -d postgres      # PostgreSQL 16
 
-# 3. Apply migrations 001..007 and seed the Hack4Hack 2026 event
-npm run db:migrate
-npm run db:seed
+npm run db:migrate                 # migrations 001 to 007
+npm run db:seed                    # the Hack4Hack 2026 event
 
-# 4. Run ESLint, TypeScript typechecking, and production builds
-npm run lint
-npm run typecheck
 npm run build
+npm run dev:api                    # API on :3001
+npm run dev:web                    # web on :5173
+```
 
-# 5. Run unit, PostgreSQL integration, 50-way race, hardening, and E2E suites
+Run the checks:
+
+```bash
+npm run lint && npm run typecheck
 npm run test:unit:sandbox
 npm run test:integration
 npm run test:race
@@ -185,13 +235,51 @@ npm run test:hardening
 npm run test:e2e
 ```
 
-### Scale Seeding (`10,000` Participants / `2,000` Teams) & k6 Benchmark
-```bash
-# Seed isolated crewmesh_loadtest database (requires CREWMESH_ALLOW_SCALE_SEED=true and *_loadtest DB name)
-DATABASE_URL=postgresql://crewmesh:crewmesh_local_dev_password@localhost:5432/crewmesh_loadtest \
-  CREWMESH_ALLOW_SCALE_SEED=true \
-  npm run db:seed:scale
+### Key configuration
 
-# Run Grafana k6 100-VU 60s board load test
-npm run bench:board:k6
+| Variable | Purpose | Default |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | required |
+| `DATABASE_SSL` | `disable`, `require` or `verify-full` | `disable` |
+| `APP_ORIGIN` | Public origin used for CSRF checks | `http://localhost:5173` |
+| `CSRF_SECRET` | At least 32 characters of entropy | required |
+| `SERVE_WEB_DIST` | Serve the built web app from the API | `false` |
+| `HACKATHON_MIN_TEAM_SIZE` / `HACKATHON_MAX_TEAM_SIZE` | Team size bounds | `2` / `5` |
+| `RATE_LIMIT_REGISTER_PER_MIN` | Registration limit per IP | `20` |
+
+Production deployment (Render web service plus Neon PostgreSQL) is described in [`docs/deployment-architecture.md`](docs/deployment-architecture.md).
+
+---
+
+## Repository map
+
+```text
+CrewMesh/
+├── apps/
+│   ├── api/            Fastify 4 + PostgreSQL: routes, services, security, migrations, tests, k6 script
+│   └── web/            React 18 + Vite: pages, SSE hooks, Playwright E2E
+├── packages/shared/    Zod schemas and types shared by API and web
+├── docs/               DESIGN.md, transaction-lock-order.md, deployment-architecture.md
+├── reports/load-test/  Load-test notes and results
+├── scripts/            Health check and verification helpers
+└── .github/workflows/  CI: lint, typecheck, build, tests, race proof, E2E, k6
 ```
+
+---
+
+## Honest limits and what I'd do next
+
+- **Chaos test:** kill the server mid-join and show nothing is corrupted. PostgreSQL transactions make this safe by design, but I have not automated the proof.
+- **Optimistic UI with rollback** on conflict is not built.
+- **Metrics and tracing:** only structured logs and health probes today.
+- **Write-path load test:** the k6 run covers the board read path; join and accept under sustained load is covered by the 50-way race test, not by k6.
+- **Docker Compose** currently starts only the database.
+- **Free-tier hosting** means cold starts on the live demo.
+
+---
+
+<div align="center">
+
+Built by **Mohamad Shafeez** for the Hack4Hack Crew Hiring Challenge 2026.
+
+</div>
