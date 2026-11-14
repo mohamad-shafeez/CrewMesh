@@ -46,7 +46,7 @@ Score = 70% skill coverage (missing team skills the candidate fills) + 30% time-
 
 ## 8. Performance
 
-Board reads use keyset pagination with covering indexes. A seed script creates 10,000 participants and 2,000 teams, with every count asserted in SQL. CI runs k6 with 100 concurrent users for 60 seconds and enforces p95 under 200 ms; the pipeline passes it.
+Board reads use keyset pagination with covering indexes. A seed script creates 10,000 participants and 2,000 teams, with every count asserted in SQL. CI runs k6 with 100 concurrent users for 60 seconds and enforces p95 under 200 ms; Run #19 passed at **p95 `160.21 ms` / `163.09 ms`** (`700.96 req/s`, `0.0000%` errors, `100.00%` checks).
 
 ## 9. Trade-offs
 

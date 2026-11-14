@@ -182,7 +182,7 @@ Some integration tests cover several numbered scenarios each, so the scenario co
 
 - `npm run db:seed:scale` creates **10,000 participants, 2,000 teams and 7,000 memberships** in an isolated `*_loadtest` database and asserts every count with SQL (500 teams each of sizes 2 to 5).
 - `npm run bench:board:k6` runs **100 concurrent virtual users for 60 seconds** against the board endpoint, after a 10-second warm-up.
-- k6 enforces `p(95) < 200 ms`, failed requests `< 1%` and checks `> 99%`. The pipeline passes these thresholds in [GitHub Actions](https://github.com/mohamad-shafeez/CrewMesh/actions); the k6 summary is attached to each run as the `crewmesh-batch9-load-test-reports` artifact.
+- k6 enforces `p(95) < 200 ms`, failed requests `< 1%` and checks `> 99%`. In [GitHub Actions Run #19](https://github.com/mohamad-shafeez/CrewMesh/actions), both measured 60s runs passed: **p50 `118.89–120.44 ms`**, **p95 `160.21–163.09 ms`**, **p99 `181.75–186.55 ms`**, **`691.34–700.96 req/s`** (`48,463` / `49,133` requests), **`0.0000%` errors**, and **`100.00%` checks passed** (summary attached as `crewmesh-batch9-load-test-reports`).
 - The benchmark runs on a shared GitHub runner and measures the read path (the board). It is not a test of write throughput.
 
 ---
