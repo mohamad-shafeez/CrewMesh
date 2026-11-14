@@ -7,8 +7,8 @@ import { closeDbPool, getDbPool, withTransaction } from './pool.js';
 import { seedHackathon } from './seed.js';
 import { hashPassword } from '../security/crypto.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const seedScaleFilename = fileURLToPath(import.meta.url);
+const seedScaleDirname = path.dirname(seedScaleFilename);
 
 export const SCALE_TOTAL_PARTICIPANTS = 10_000;
 export const SCALE_TOTAL_TEAMS = 2_000;
@@ -905,7 +905,7 @@ export async function seedScaleDataset(
   assertExactScaleCountsSnapshot(afterCounts);
 
   if (options?.writeReportsToDisk !== false) {
-    const reportsDir = path.resolve(__dirname, '../../../../reports/load-test');
+    const reportsDir = path.resolve(seedScaleDirname, '../../../../reports/load-test');
     fs.mkdirSync(reportsDir, { recursive: true });
     fs.writeFileSync(
       path.join(reportsDir, 'database-counts.json'),
@@ -939,7 +939,7 @@ async function runCli(): Promise<void> {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+if (process.argv[1] && path.resolve(process.argv[1]) === seedScaleFilename) {
   runCli().catch((err) => {
     console.error(
       JSON.stringify({

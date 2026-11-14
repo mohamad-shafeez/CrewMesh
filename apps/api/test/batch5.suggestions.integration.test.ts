@@ -175,7 +175,7 @@ describe('Batch 5 — Explainable Teammate Intelligence & Skill-Timezone Matchin
     const jrId = jrRes.json<{ joinRequest: { id: string } }>().joinRequest.id;
     await app.inject({
       method: 'POST',
-      url: `/api/v1/join-requests/${jrId}/accept`,
+      url: `/api/v1/teams/${teamA.id}/join-requests/${jrId}/accept`,
       headers: authMutationHeaders(leaderA),
     });
 
@@ -243,7 +243,7 @@ describe('Batch 5 — Explainable Teammate Intelligence & Skill-Timezone Matchin
       });
       await app.inject({
         method: 'POST',
-        url: `/api/v1/join-requests/${jr.json().joinRequest.id}/accept`,
+        url: `/api/v1/teams/${teamId}/join-requests/${jr.json().joinRequest.id}/accept`,
         headers: authMutationHeaders(leader),
       });
     }

@@ -14,6 +14,7 @@ import {
   addMemberToLockedTeamTx,
   assertTeamLeaderTx,
   getTeamByIdOrThrow,
+  lockActiveHackathonParticipantForUpdateTx,
   lockTeamByIdOrThrow,
   requireActiveHackathonParticipantTx,
   resolveHackathonOrThrow,
@@ -100,7 +101,7 @@ export async function createJoinRequestTx(
     requireRegistrationOpen: true,
   });
 
-  // Verify the applicant is an active registered participant in this hackathon (locked FOR KEY SHARE)
+  // Verify the applicant is an active registered participant in this hackathon (locked FOR SHARE)
   await requireActiveHackathonParticipantTx(client, team.hackathon_id, params.actorUserId);
 
   // Check if user is already in this team or another team in the same hackathon
@@ -325,16 +326,19 @@ export async function listTeamJoinRequestsForLeader(
 }
 
 /**
- * Race-proof join request acceptance transaction:
+ * Race-proof and deadlock-free join request acceptance transaction:
  * 1. Locks the target `teams` row with `SELECT ... FOR UPDATE`.
- * 2. Verifies caller is the current leader in PostgreSQL.
- * 3. Locks the target `join_requests` row with `SELECT ... FOR UPDATE`.
- * 4. Verifies request belongs to team and is still `'pending'`.
- * 5. Calls `addMemberToLockedTeamTx` (verifying active `hackathon_participants` status `FOR KEY SHARE`,
- *    verifying capacity against `COUNT(*)` in `team_members`, and enforcing `UNIQUE (hackathon_id, user_id)`).
- * 6. Marks the join request `'accepted'` and writes audit + outbox events in the same transaction.
- * Note: For `source === 'invite_code'`, the invitation usage slot (`invite_codes.use_count`) was already
- * atomically validated and incremented during `redeemInviteCodeTx`.
+ * 2. Verifies caller is the current leader in PostgreSQL and hackathon registration is open.
+ * 3. Retrieves the target join request's applicant ID (`user_id`) using a non-locking `SELECT`.
+ * 4. Acquires an exclusive participant-registration row lock (`FOR UPDATE` on `hackathon_participants`)
+ *    BEFORE locking the `join_requests` row, serializing concurrent acceptances of the same applicant
+ *    across different teams without deadlocking on cross-team `join_requests` cancellation.
+ * 5. Verifies active participant eligibility (`status = 'registered'`).
+ * 6. Checks whether that participant already belongs to a team in the hackathon; if so, returns `409 ALREADY_IN_TEAM`.
+ * 7. Locks the target `join_requests` row (`FOR UPDATE`) and revalidates its `status`, `team_id`, and `user_id`.
+ * 8. Executes membership creation (`addMemberToLockedTeamTx`) and marks the join request `'accepted'`.
+ * 9. Cancels other pending join requests by that participant in the hackathon and expires remaining requests if full.
+ * 10. Writes `JOIN_REQUEST_ACCEPTED` audit and outbox records within the same transaction.
  */
 export async function acceptJoinRequestTx(
   client: PoolClient,
@@ -355,10 +359,52 @@ export async function acceptJoinRequestTx(
   // Step 1: Lock target team row FOR UPDATE
   const team = await lockTeamByIdOrThrow(client, params.teamId);
 
-  // Step 2: Verify leader permissions inside transaction
+  // Step 2: Verify leader permissions and active hackathon inside transaction
   await assertTeamLeaderTx(client, team, params.actorUserId);
+  await resolveHackathonOrThrow(team.hackathon_id, client, {
+    requireRegistrationOpen: true,
+  });
 
-  // Step 3: Lock the target join request FOR UPDATE
+  // Step 3: Non-locking lookup of the target join request to identify the applicant
+  const prelimRes = await client.query<{
+    id: string;
+    team_id: string;
+    hackathon_id: string;
+    user_id: string;
+    status: JoinRequestStatus;
+  }>(
+    `
+    SELECT id, team_id, hackathon_id, user_id, status
+    FROM join_requests
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [params.joinRequestId],
+  );
+
+  const prelimReq = prelimRes.rows[0];
+  if (!prelimReq || prelimReq.team_id !== team.id) {
+    throw new AppError(404, 'JOIN_REQUEST_NOT_FOUND', 'Join request not found for this team');
+  }
+
+  // Steps 4 & 5: Acquire exclusive participant lock (FOR UPDATE) BEFORE locking join_requests
+  // and verify active participant eligibility (status === 'registered')
+  await lockActiveHackathonParticipantForUpdateTx(client, team.hackathon_id, prelimReq.user_id);
+
+  // Steps 6 & 7: Check whether the participant already belongs to a team in the hackathon
+  const existingMembership = await client.query<{ team_id: string }>(
+    'SELECT team_id FROM team_members WHERE hackathon_id = $1 AND user_id = $2 LIMIT 1',
+    [team.hackathon_id, prelimReq.user_id],
+  );
+  if (existingMembership.rows.length > 0) {
+    throw new AppError(
+      409,
+      'ALREADY_IN_TEAM',
+      'Participant already belongs to a team in this hackathon',
+    );
+  }
+
+  // Step 8: Lock the target join_requests row FOR UPDATE and revalidate status, team_id, and user_id
   const reqRes = await client.query<JoinRequestRow>(
     `
     SELECT
@@ -382,7 +428,7 @@ export async function acceptJoinRequestTx(
   );
 
   const joinReq = reqRes.rows[0];
-  if (!joinReq || joinReq.team_id !== team.id) {
+  if (!joinReq || joinReq.team_id !== team.id || joinReq.user_id !== prelimReq.user_id) {
     throw new AppError(404, 'JOIN_REQUEST_NOT_FOUND', 'Join request not found for this team');
   }
 
@@ -394,11 +440,7 @@ export async function acceptJoinRequestTx(
     );
   }
 
-  await resolveHackathonOrThrow(team.hackathon_id, client, {
-    requireRegistrationOpen: true,
-  });
-
-  // Step 5: Add member via shared serialized membership engine (also locks & verifies hackathon_participants)
+  // Step 9: Execute membership creation and mark join_request 'accepted' transactionally
   const added = await addMemberToLockedTeamTx(client, {
     team,
     candidateUserId: joinReq.user_id,
@@ -412,7 +454,6 @@ export async function acceptJoinRequestTx(
     },
   });
 
-  // Step 6: Update join_request status to 'accepted'
   const updatedReqRes = await client.query<JoinRequestRow>(
     `
     UPDATE join_requests
@@ -440,7 +481,7 @@ export async function acceptJoinRequestTx(
   );
   const updatedReq = updatedReqRes.rows[0]!;
 
-  // Cancel any other pending join requests by this user in the same hackathon
+  // Step 10: Cancel any other pending join requests by this user in the same hackathon safely
   await client.query(
     `
     UPDATE join_requests
@@ -470,6 +511,7 @@ export async function acceptJoinRequestTx(
     );
   }
 
+  // Step 11: Write audit and outbox records within the same transaction
   await insertAuditLog(client, {
     hackathonId: team.hackathon_id,
     teamId: team.id,

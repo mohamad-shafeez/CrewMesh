@@ -1,4 +1,4 @@
-# CrewMesh — Scale & k6 Load-Test Benchmark Environment (Batches 06–09)
+# CrewMesh — Scale & k6 Load-Test Benchmark Environment
 
 ## 1. Benchmark Target & Configuration
 - **Target Endpoint**: `GET /api/v1/hackathons/hack4hack-crew-2026/teams`
@@ -9,7 +9,7 @@
   - `http_req_duration{scenario:board_load}: ['p(95)<200']`
   - `http_req_failed{scenario:board_load}: ['rate<0.01']`
   - `checks{scenario:board_load}: ['rate>0.99']`
-- **Scenario-Tagged Summary Isolation (Batch 08/09)**:
+- **Scenario-Tagged Summary Isolation**:
   - `handleSummary()` reads `data.metrics['http_reqs{scenario:board_load}']` first so setup-phase login/board warm-up requests do not inflate the reported `board_load_http_reqs` count, while also recording `total_http_reqs_including_setup` separately.
 
 ## 2. Seeded Benchmark Dataset (`npm run db:seed:scale`)
@@ -21,11 +21,11 @@
   - Reserved synthetic participant email domain: `@crewmesh.invalid` (`loadtest-00001@crewmesh.invalid` .. `loadtest-10000@crewmesh.invalid`)
 - **Exact Verified Dataset Counts (`assertExactScaleCountsSnapshot`)**:
   - **Participants (`users` + `hackathon_participants`)**: `10,000`
-  - **Teams (`teams`)**: `2,000` (SQL-verified exact distribution: `500` size-2, `500` size-3, `500` size-4, `500` size-5)
+  - **Teams (`teams`)**: `2,000` (SQL-verified exact distribution: `500` size-2, `500` size-3, `500` size-4, `500` size-5; all `2,000` teams have `status = 'ready'` since `member_count >= min_team_size`)
   - **Team Memberships (`team_members`)**: `7,000` (`2,000` leaders + `5,000` members)
   - **Unassigned Eligible Participants**: `3,000`
-  - **Open-Capacity Recruiting Teams**: `1,500` (`looking_for_members = TRUE`)
-  - **Full-Capacity Teams**: `500` (`member_count = 5`, `looking_for_members = FALSE`, `status = 'full'`)
+  - **Open-Capacity Recruiting Teams**: `1,500` (`member_count < max_team_size`, `looking_for_members = TRUE`, `status = 'ready'`)
+  - **Full-Capacity Teams**: `500` (`member_count = max_team_size = 5`, `looking_for_members = FALSE`, `status = 'ready'`, represented in API responses with `isFull: true` and `availableSeats: 0`)
 
 ## 3. Execution Status vs. Benchmark Target
 - **Benchmark Target**: `p(95) < 200 ms`, error rate `< 1%`, check pass rate `> 99%` under `100` concurrent virtual users for `60s` against `10,000` participants and `2,000` teams.

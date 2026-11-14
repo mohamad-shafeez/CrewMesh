@@ -155,6 +155,45 @@ export async function requireActiveHackathonParticipantTx(
 export const ensureHackathonParticipantTx = requireActiveHackathonParticipantTx;
 
 /**
+ * Acquires an exclusive (`FOR UPDATE`) row lock on the participant's registration row in
+ * `hackathon_participants` and verifies `status === 'registered'`.
+ * Used by `acceptJoinRequestTx` before locking `join_requests` so concurrent acceptances of the
+ * same applicant across different teams serialize cleanly at the participant level without deadlocking.
+ */
+export async function lockActiveHackathonParticipantForUpdateTx(
+  client: PoolClient,
+  hackathonId: string,
+  userId: string,
+): Promise<void> {
+  const res = await client.query<{ status: HackathonParticipantStatus }>(
+    `
+    SELECT status
+    FROM hackathon_participants
+    WHERE hackathon_id = $1 AND user_id = $2
+    FOR UPDATE
+    `,
+    [hackathonId, userId],
+  );
+
+  const row = res.rows[0];
+  if (!row) {
+    throw new AppError(
+      403,
+      'NOT_HACKATHON_PARTICIPANT',
+      'User is not a registered participant in this hackathon',
+    );
+  }
+
+  if (row.status !== 'registered') {
+    throw new AppError(
+      403,
+      'NOT_HACKATHON_PARTICIPANT',
+      `User is not eligible to participate in this hackathon (status: ${row.status})`,
+    );
+  }
+}
+
+/**
  * Locks a team row with `SELECT ... FOR UPDATE` and verifies it exists.
  */
 export async function lockTeamByIdOrThrow(

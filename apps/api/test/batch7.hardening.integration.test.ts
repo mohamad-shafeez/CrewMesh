@@ -91,7 +91,7 @@ function authMutationHeaders(actor: TestActor, idempotencyKey?: string): Record<
   };
 }
 
-describe('Batches 7 & 8 — Final Backend Reliability, Outbox Commit-Order, FOR SHARE Participant Locking, Registration Integrity & Security Hardening Suite (PostgreSQL)', () => {
+describe('Batches 7–10 — Final Backend Reliability, Outbox Commit-Order, Participant Locking, Cross-Team Concurrency & Security Hardening Suite (PostgreSQL)', () => {
   let app: FastifyInstance;
   let hackathonId: string;
 
@@ -135,7 +135,7 @@ describe('Batches 7 & 8 — Final Backend Reliability, Outbox Commit-Order, FOR 
     `);
   }
 
-  it('1. Participant Eligibility & Registration Rollback (Batch 8 Sections 3 & 4): blocks invalid/inactive hackathon registration with full rollback, blocks unregistered/withdrawn/disqualified accounts, and enforces FOR SHARE row locks', async () => {
+  it('1. Participant Eligibility & Registration Rollback: blocks invalid/inactive hackathon registration with full rollback, blocks unregistered/withdrawn/disqualified accounts, and enforces FOR SHARE/FOR UPDATE row locks', async () => {
     await cleanDatabase();
     const pool = getDbPool();
 
@@ -270,7 +270,7 @@ describe('Batches 7 & 8 — Final Backend Reliability, Outbox Commit-Order, FOR 
     // Because withdrawal committed, leader acceptance is now rejected with 403 NOT_HACKATHON_PARTICIPANT
     const blockedAcceptRes = await app.inject({
       method: 'POST',
-      url: `/api/v1/join-requests/${joinRequestId}/accept`,
+      url: `/api/v1/teams/${teamId}/join-requests/${joinRequestId}/accept`,
       headers: authMutationHeaders(leader),
     });
     expect(blockedAcceptRes.statusCode).toBe(403);
@@ -283,14 +283,14 @@ describe('Batches 7 & 8 — Final Backend Reliability, Outbox Commit-Order, FOR 
     );
     const okAcceptRes = await app.inject({
       method: 'POST',
-      url: `/api/v1/join-requests/${joinRequestId}/accept`,
+      url: `/api/v1/teams/${teamId}/join-requests/${joinRequestId}/accept`,
       headers: authMutationHeaders(leader),
     });
     expect(okAcceptRes.statusCode).toBe(200);
     expect(okAcceptRes.json().team.memberCount).toBe(2);
   });
 
-  it('2. Outbox Commit-Order & Migration 007 Explicit ID Protection (Batch 8 Section 5.3): serializes concurrent outbox IDs in commit order and rejects explicit caller-supplied IDs', async () => {
+  it('2. Outbox Commit-Order & Migration 007 Explicit ID Protection: serializes concurrent outbox IDs in commit order and rejects explicit caller-supplied IDs', async () => {
     await cleanDatabase();
     const pool = getDbPool();
 
@@ -349,70 +349,135 @@ describe('Batches 7 & 8 — Final Backend Reliability, Outbox Commit-Order, FOR 
     }
   });
 
-  it('3. Cross-Team Same-Participant Concurrency Race: when two leaders concurrently accept the same participant into two different teams, exactly one succeeds (200) and the other fails with 409 ALREADY_IN_TEAM', async () => {
+  it('3. Cross-Team Same-Participant Concurrency Race (Repeated 5 Rounds): when two leaders simultaneously accept the same participant into two different teams, exactly one succeeds (200) and the other fails with 409 ALREADY_IN_TEAM without deadlocking', async () => {
     await cleanDatabase();
-
-    const leader1 = await registerTestActor(app, 'CrossLeader1');
-    const leader2 = await registerTestActor(app, 'CrossLeader2');
-    const sharedApplicant = await registerTestActor(app, 'SharedApplicant');
-
-    const t1Res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/hackathons/${hackathonId}/teams`,
-      headers: authMutationHeaders(leader1),
-      payload: { name: 'Cross Race Team One', description: 'Team 1' },
-    });
-    const team1Id = t1Res.json<TeamDetailResponseDto>().team.id;
-
-    const t2Res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/hackathons/${hackathonId}/teams`,
-      headers: authMutationHeaders(leader2),
-      payload: { name: 'Cross Race Team Two', description: 'Team 2' },
-    });
-    const team2Id = t2Res.json<TeamDetailResponseDto>().team.id;
-
-    const jr1Res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/teams/${team1Id}/join-requests`,
-      headers: authMutationHeaders(sharedApplicant),
-      payload: { message: 'Requesting Team 1' },
-    });
-    const jr1Id = jr1Res.json<{ joinRequest: JoinRequestDto }>().joinRequest.id;
-
-    const jr2Res = await app.inject({
-      method: 'POST',
-      url: `/api/v1/teams/${team2Id}/join-requests`,
-      headers: authMutationHeaders(sharedApplicant),
-      payload: { message: 'Requesting Team 2' },
-    });
-    const jr2Id = jr2Res.json<{ joinRequest: JoinRequestDto }>().joinRequest.id;
-
-    const [acc1, acc2] = await Promise.all([
-      app.inject({
-        method: 'POST',
-        url: `/api/v1/join-requests/${jr1Id}/accept`,
-        headers: authMutationHeaders(leader1),
-      }),
-      app.inject({
-        method: 'POST',
-        url: `/api/v1/join-requests/${jr2Id}/accept`,
-        headers: authMutationHeaders(leader2),
-      }),
-    ]);
-
-    const statuses = [acc1.statusCode, acc2.statusCode].sort();
-    expect(statuses).toEqual([200, 409]);
-
     const pool = getDbPool();
-    const memberCountRes = await pool.query<{ cnt: number }>(
-      'SELECT COUNT(*)::int AS cnt FROM team_members WHERE hackathon_id = $1 AND user_id = $2',
-      [hackathonId, sharedApplicant.userId],
-    );
-    expect(memberCountRes.rows[0]?.cnt).toBe(1);
+
+    for (let round = 1; round <= 5; round++) {
+      const leader1 = await registerTestActor(app, `CrossLeader1_R${round}`);
+      const leader2 = await registerTestActor(app, `CrossLeader2_R${round}`);
+      const sharedApplicant = await registerTestActor(app, `SharedApplicant_R${round}`);
+
+      const t1Res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/hackathons/${hackathonId}/teams`,
+        headers: authMutationHeaders(leader1),
+        payload: { name: `Cross Race Team One R${round}`, description: 'Team 1' },
+      });
+      expect(t1Res.statusCode).toBe(201);
+      const team1Id = t1Res.json<TeamDetailResponseDto>().team.id;
+
+      const t2Res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/hackathons/${hackathonId}/teams`,
+        headers: authMutationHeaders(leader2),
+        payload: { name: `Cross Race Team Two R${round}`, description: 'Team 2' },
+      });
+      expect(t2Res.statusCode).toBe(201);
+      const team2Id = t2Res.json<TeamDetailResponseDto>().team.id;
+
+      const jr1Res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/teams/${team1Id}/join-requests`,
+        headers: authMutationHeaders(sharedApplicant),
+        payload: { message: 'Requesting Team 1' },
+      });
+      expect(jr1Res.statusCode).toBe(201);
+      const jr1Id = jr1Res.json<{ joinRequest: JoinRequestDto }>().joinRequest.id;
+
+      const jr2Res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/teams/${team2Id}/join-requests`,
+        headers: authMutationHeaders(sharedApplicant),
+        payload: { message: 'Requesting Team 2' },
+      });
+      expect(jr2Res.statusCode).toBe(201);
+      const jr2Id = jr2Res.json<{ joinRequest: JoinRequestDto }>().joinRequest.id;
+
+      const [acc1, acc2] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/teams/${team1Id}/join-requests/${jr1Id}/accept`,
+          headers: authMutationHeaders(leader1),
+        }),
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/teams/${team2Id}/join-requests/${jr2Id}/accept`,
+          headers: authMutationHeaders(leader2),
+        }),
+      ]);
+
+      // Neither request may fail with 500 or deadlock
+      expect(acc1.statusCode).not.toBe(500);
+      expect(acc2.statusCode).not.toBe(500);
+
+      const statuses = [acc1.statusCode, acc2.statusCode].sort();
+      expect(statuses).toEqual([200, 409]);
+
+      const winnerRes = acc1.statusCode === 200 ? acc1 : acc2;
+      const loserRes = acc1.statusCode === 200 ? acc2 : acc1;
+      const winningTeamId = acc1.statusCode === 200 ? team1Id : team2Id;
+      const losingTeamId = acc1.statusCode === 200 ? team2Id : team1Id;
+      const winningJrId = acc1.statusCode === 200 ? jr1Id : jr2Id;
+      const losingJrId = acc1.statusCode === 200 ? jr2Id : jr1Id;
+
+      expect(winnerRes.statusCode).toBe(200);
+      expect(loserRes.statusCode).toBe(409);
+      expect(loserRes.json().error.code).toBe('ALREADY_IN_TEAM');
+
+      // Verify the participant has exactly 1 membership row in the winning team
+      const membershipRes = await pool.query<{ team_id: string }>(
+        'SELECT team_id FROM team_members WHERE hackathon_id = $1 AND user_id = $2',
+        [hackathonId, sharedApplicant.userId],
+      );
+      expect(membershipRes.rowCount).toBe(1);
+      expect(membershipRes.rows[0]?.team_id).toBe(winningTeamId);
+
+      // Verify both teams have accurate member_count matching actual team_members count
+      const teamsDbRes = await pool.query<{ id: string; member_count: number; status: string }>(
+        'SELECT id, member_count, status FROM teams WHERE id = ANY($1::uuid[])',
+        [[winningTeamId, losingTeamId]],
+      );
+      const winningTeamRow = teamsDbRes.rows.find((r) => r.id === winningTeamId);
+      const losingTeamRow = teamsDbRes.rows.find((r) => r.id === losingTeamId);
+      expect(winningTeamRow?.member_count).toBe(2);
+      expect(winningTeamRow?.status).toBe('ready');
+      expect(losingTeamRow?.member_count).toBe(1);
+      expect(losingTeamRow?.status).toBe('forming');
+
+      // Verify join_requests rows reflect 'accepted' on winner and 'cancelled' on loser
+      const jrDbRes = await pool.query<{ id: string; status: string }>(
+        'SELECT id, status FROM join_requests WHERE id = ANY($1::uuid[])',
+        [[winningJrId, losingJrId]],
+      );
+      const winningJrRow = jrDbRes.rows.find((r) => r.id === winningJrId);
+      const losingJrRow = jrDbRes.rows.find((r) => r.id === losingJrId);
+      expect(winningJrRow?.status).toBe('accepted');
+      expect(losingJrRow?.status).toBe('cancelled');
+
+      // Verify audit_log and outbox_events match the committed outcome
+      const auditRes = await pool.query<{ team_id: string; entity_id: string }>(
+        `SELECT team_id, entity_id FROM audit_log
+         WHERE hackathon_id = $1 AND action = 'JOIN_REQUEST_ACCEPTED' AND target_user_id = $2`,
+        [hackathonId, sharedApplicant.userId],
+      );
+      expect(auditRes.rowCount).toBe(1);
+      expect(auditRes.rows[0]?.team_id).toBe(winningTeamId);
+      expect(auditRes.rows[0]?.entity_id).toBe(winningJrId);
+
+      const outboxRes = await pool.query<{ team_id: string; event_type: string }>(
+        `SELECT team_id, event_type FROM outbox_events
+         WHERE hackathon_id = $1
+           AND event_type IN ('JOIN_REQUEST_ACCEPTED', 'MEMBER_JOINED')
+           AND (payload->>'acceptedUserId' = $2 OR payload->>'userId' = $2)`,
+        [hackathonId, sharedApplicant.userId],
+      );
+      expect(outboxRes.rowCount).toBe(2);
+      expect(outboxRes.rows.every((r) => r.team_id === winningTeamId)).toBe(true);
+    }
   });
 
-  it('4. Simultaneous Identical Idempotency Requests & Email Login Rate Limiting (Batch 8 Section 7)', async () => {
+  it('4. Simultaneous Identical Idempotency Requests & Email Login Rate Limiting', async () => {
     await cleanDatabase();
     const leader = await registerTestActor(app, 'SimulIdemLeader');
     const sharedKey = `simul_idem_${crypto.randomUUID()}`;
@@ -495,11 +560,12 @@ describe('Batches 7 & 8 — Final Backend Reliability, Outbox Commit-Order, FOR 
       headers: authMutationHeaders(member),
       payload: {},
     });
-    await app.inject({
+    const acceptRes = await app.inject({
       method: 'POST',
-      url: `/api/v1/join-requests/${jrRes.json().joinRequest.id}/accept`,
+      url: `/api/v1/teams/${teamId}/join-requests/${jrRes.json().joinRequest.id}/accept`,
       headers: authMutationHeaders(leader),
     });
+    expect(acceptRes.statusCode).toBe(200);
 
     const pool = getDbPool();
 

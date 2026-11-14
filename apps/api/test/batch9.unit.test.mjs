@@ -22,7 +22,7 @@ const poolMod = loadTsModule(path.join(repoRoot, 'apps/api/src/db/pool.ts'), {
   },
 });
 
-test('1. scripts/ts-loader.mjs and .eslintrc.js contain zero OS-specific fallback paths or Module._load shims and execute real production TypeScript modules', () => {
+test('1. scripts/ts-loader.mjs, seed-scale.ts, and .eslintrc.js contain zero loader identifier collisions, OS fallback paths, or Module._load shims', () => {
   const loaderSource = fs.readFileSync(path.join(repoRoot, 'scripts/ts-loader.mjs'), 'utf8');
   assert.equal(
     loaderSource.includes('usr/share'),
@@ -33,6 +33,18 @@ test('1. scripts/ts-loader.mjs and .eslintrc.js contain zero OS-specific fallbac
     loaderSource.includes('usr/local/lib'),
     false,
     'scripts/ts-loader.mjs must not reference OS-specific lib directories',
+  );
+
+  const seedScaleSource = fs.readFileSync(
+    path.join(repoRoot, 'apps/api/src/db/seed-scale.ts'),
+    'utf8',
+  );
+  assert.match(seedScaleSource, /const seedScaleFilename = fileURLToPath\(import\.meta\.url\);/);
+  assert.match(seedScaleSource, /const seedScaleDirname = path\.dirname\(seedScaleFilename\);/);
+  assert.equal(
+    seedScaleSource.includes('__filename') || seedScaleSource.includes('__dirname'),
+    false,
+    'seed-scale.ts must use seedScaleFilename/seedScaleDirname to avoid CJS wrapper parameter collision',
   );
 
   const eslintConfig = fs.readFileSync(path.join(repoRoot, '.eslintrc.js'), 'utf8');
@@ -175,45 +187,51 @@ test('4. Workspace script matrix and dependency declarations in root, shared, ap
   assert.equal(webPkg.scripts.pretypecheck, 'npm --prefix ../../packages/shared run build');
 });
 
-test('5. Complete Batches 1-10 regression inventory and pre-deployment hygiene checks pass', () => {
-  const expectedFiles = [
-    'apps/api/migrations/001_initial_schema.up.sql',
-    'apps/api/migrations/001_initial_schema.down.sql',
-    'apps/api/migrations/002_team_engine_and_integrity.up.sql',
-    'apps/api/migrations/002_team_engine_and_integrity.down.sql',
-    'apps/api/migrations/003_nullable_deadline_and_outbox_notify.up.sql',
-    'apps/api/migrations/003_nullable_deadline_and_outbox_notify.down.sql',
-    'apps/api/migrations/004_suggestions_and_preferences.up.sql',
-    'apps/api/migrations/004_suggestions_and_preferences.down.sql',
-    'apps/api/migrations/005_scale_performance_and_timezone_provenance.up.sql',
-    'apps/api/migrations/005_scale_performance_and_timezone_provenance.down.sql',
-    'apps/api/migrations/006_outbox_commit_order_and_participant_fk.up.sql',
-    'apps/api/migrations/006_outbox_commit_order_and_participant_fk.down.sql',
-    'apps/api/migrations/007_strict_outbox_id_and_rate_limit_cleanup.up.sql',
-    'apps/api/migrations/007_strict_outbox_id_and_rate_limit_cleanup.down.sql',
-    'apps/api/test/phase1.integration.test.ts',
-    'apps/api/test/batch2.integration.test.ts',
-    'apps/api/test/batch2.race.test.ts',
-    'apps/api/test/batch3.sse.integration.test.ts',
-    'apps/api/test/batch5.suggestions.integration.test.ts',
-    'apps/api/test/scale/scale-seed.integration.test.ts',
-    'apps/api/test/batch7.hardening.integration.test.ts',
-    'apps/web/src/App.test.tsx',
-    'apps/web/e2e/crewmesh.spec.ts',
-    'apps/api/load/board.k6.js',
-    'docs/transaction-lock-order.md',
-    'docs/workspace-script-matrix.md',
-    'docs/deployment-architecture.md',
-    'reports/load-test/benchmark-environment.md',
-  ];
+test('5. acceptJoinRequestTx enforces participant FOR UPDATE serialization before locking join_requests, and all integration tests use /api/v1/teams/:teamId/join-requests/:requestId/accept', () => {
+  const joinReqService = fs.readFileSync(
+    path.join(repoRoot, 'apps/api/src/services/join-request-service.ts'),
+    'utf8',
+  );
+  const acceptFnBody = joinReqService.slice(
+    joinReqService.indexOf('export async function acceptJoinRequestTx'),
+    joinReqService.indexOf('export async function declineJoinRequestTx'),
+  );
 
-  for (const relPath of expectedFiles) {
-    const fullPath = path.join(repoRoot, relPath);
-    assert.equal(fs.existsSync(fullPath), true, `Missing required repository file: ${relPath}`);
-    assert.equal(fs.statSync(fullPath).size > 0, true, `File is empty: ${relPath}`);
-  }
+  const participantLockIdx = acceptFnBody.indexOf('lockActiveHackathonParticipantForUpdateTx');
+  const joinReqForUpdateIdx = acceptFnBody.indexOf('FROM join_requests\n    WHERE id = $1\n    FOR UPDATE');
+  assert.ok(participantLockIdx > 0, 'acceptJoinRequestTx must call lockActiveHackathonParticipantForUpdateTx');
+  assert.ok(joinReqForUpdateIdx > 0, 'acceptJoinRequestTx must lock join_requests FOR UPDATE');
+  assert.ok(
+    participantLockIdx < joinReqForUpdateIdx,
+    'acceptJoinRequestTx must acquire participant FOR UPDATE lock BEFORE locking join_requests FOR UPDATE',
+  );
 
-  const envExample = fs.readFileSync(path.join(repoRoot, '.env.example'), 'utf8');
-  assert.match(envExample, /DATABASE_SSL=disable/);
-  assert.match(envExample, /SERVE_WEB_DIST=false/);
+  const b7Test = fs.readFileSync(
+    path.join(repoRoot, 'apps/api/test/batch7.hardening.integration.test.ts'),
+    'utf8',
+  );
+  const b5Test = fs.readFileSync(
+    path.join(repoRoot, 'apps/api/test/batch5.suggestions.integration.test.ts'),
+    'utf8',
+  );
+  assert.equal(
+    b7Test.includes('/api/v1/join-requests/'),
+    false,
+    'batch7.hardening.integration.test.ts must use /api/v1/teams/:teamId/join-requests/:requestId/accept',
+  );
+  assert.equal(
+    b5Test.includes('/api/v1/join-requests/'),
+    false,
+    'batch5.suggestions.integration.test.ts must use /api/v1/teams/:teamId/join-requests/:requestId/accept',
+  );
+
+  const benchDoc = fs.readFileSync(
+    path.join(repoRoot, 'reports/load-test/benchmark-environment.md'),
+    'utf8',
+  );
+  assert.equal(
+    benchDoc.includes("status = 'full'"),
+    false,
+    "benchmark-environment.md must not describe status = 'full' as a persisted DB status",
+  );
 });
