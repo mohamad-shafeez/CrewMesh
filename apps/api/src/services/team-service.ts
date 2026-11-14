@@ -416,7 +416,59 @@ export async function getTeamByIdOrThrow(
  */
 let cachedBoardHackathon: { ref: string; row: HackathonRow; exp: number } | null = null;
 
+const boardPageCache = new Map<string, { exp: number; data: TeamBoardPageResponse }>();
+const boardInFlight = new Map<string, Promise<TeamBoardPageResponse>>();
+
+export function invalidateBoardCache(): void {
+  cachedBoardHackathon = null;
+  boardPageCache.clear();
+  boardInFlight.clear();
+}
+
 export async function listTeamBoard(
+  params: {
+    hackathonIdOrSlug: string;
+    cursor?: string;
+    limit?: number;
+    status?: TeamStatus;
+    hasCapacity?: boolean;
+    lookingForMembers?: boolean;
+    skill?: string;
+    search?: string;
+  },
+  db: Queryable = getDbPool(),
+): Promise<TeamBoardPageResponse> {
+  const key = JSON.stringify([
+    params.hackathonIdOrSlug.trim(),
+    params.cursor ?? "",
+    params.limit ?? 20,
+    params.status ?? "",
+    params.hasCapacity ?? "",
+    params.lookingForMembers ?? "",
+    params.skill?.trim().toLowerCase() ?? "",
+    params.search?.trim().toLowerCase() ?? "",
+  ]);
+  const hit = boardPageCache.get(key);
+  if (hit && hit.exp > Date.now()) {
+    return hit.data;
+  }
+  const pending = boardInFlight.get(key);
+  if (pending) {
+    return pending;
+  }
+  const work = queryTeamBoardUncached(params, db).then((res) => {
+    boardPageCache.set(key, { exp: Date.now() + 2000, data: res });
+    return res;
+  });
+  boardInFlight.set(key, work);
+  try {
+    return await work;
+  } finally {
+    boardInFlight.delete(key);
+  }
+}
+
+async function queryTeamBoardUncached(
   params: {
     hackathonIdOrSlug: string;
     cursor?: string;
@@ -640,6 +692,7 @@ export async function addMemberToLockedTeamTx(
     },
   });
 
+  invalidateBoardCache();
   await insertOutboxEvent(client, {
     hackathonId: team.hackathon_id,
     teamId: team.id,
@@ -811,6 +864,7 @@ export async function createTeamTx(
     },
   });
 
+  invalidateBoardCache();
   await insertOutboxEvent(client, {
     hackathonId: hackathon.id,
     teamId: teamRow.id,
@@ -909,6 +963,7 @@ export async function updateTeamPreferencesTx(
     },
   });
 
+  invalidateBoardCache();
   await insertOutboxEvent(client, {
     hackathonId: team.hackathon_id,
     teamId: team.id,
@@ -1025,6 +1080,7 @@ export async function removeMemberTx(
     },
   });
 
+  invalidateBoardCache();
   await insertOutboxEvent(client, {
     hackathonId: team.hackathon_id,
     teamId: team.id,
@@ -1127,7 +1183,8 @@ export async function leaveTeamTx(
       },
     });
 
-    await insertOutboxEvent(client, {
+    invalidateBoardCache();
+  await insertOutboxEvent(client, {
       hackathonId: team.hackathon_id,
       teamId: team.id,
       scope: 'both',
@@ -1229,7 +1286,8 @@ export async function leaveTeamTx(
       },
     });
 
-    await insertOutboxEvent(client, {
+    invalidateBoardCache();
+  await insertOutboxEvent(client, {
       hackathonId: team.hackathon_id,
       teamId: team.id,
       scope: 'both',
@@ -1247,7 +1305,8 @@ export async function leaveTeamTx(
       },
     });
   } else {
-    await insertOutboxEvent(client, {
+    invalidateBoardCache();
+  await insertOutboxEvent(client, {
       hackathonId: team.hackathon_id,
       teamId: team.id,
       scope: 'both',
