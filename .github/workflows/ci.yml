@@ -186,7 +186,7 @@ jobs:
       - name: Install official Grafana k6 load testing binary
         uses: grafana/setup-k6-action@v1
         with:
-          k6-version: v0.52.0
+          k6-version: 0.52.0
 
       - name: Start Fastify production server and execute two 100-VU 60-second k6 board benchmarks
         run: |
