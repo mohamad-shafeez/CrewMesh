@@ -9,7 +9,7 @@
 
 ![CI](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml/badge.svg)
 
-](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml)
+(https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml)
 
 
 ![Live](https://img.shields.io/badge/live-crewmesh.onrender.com-1F8A63)
