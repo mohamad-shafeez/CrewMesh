@@ -66,7 +66,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await registerInviteRoutes(app);
   await registerEventRoutes(app);
 
-  const webDistDir = path.resolve(__dirname, '../../../web/dist');
+  const webDistDir = path.resolve(__dirname, '../../web/dist');
   const webIndexHtml = path.join(webDistDir, 'index.html');
   const shouldServeStaticWeb =
     (env.SERVE_WEB_DIST || process.env.SERVE_WEB_DIST === 'true' || env.NODE_ENV === 'production') &&
