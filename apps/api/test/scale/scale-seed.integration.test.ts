@@ -208,6 +208,9 @@ describe('Batch 6 & 8 — Time-Zone Provenance, Redundant Index Audit, Participa
     expect(sugBody.candidates.map((c) => c.userId)).not.toContain(unrelatedUserId);
     expect(sugBody.diagnostics.timezoneEvidence.teamMembersCount).toBe(1);
     expect(sugBody.diagnostics.timezoneEvidence.confirmedTeamMembersCount).toBe(1);
+
+    // cleanup: remove the eligibility team so scale seed counts stay exact (2000 teams)
+    await pool.query('DELETE FROM teams WHERE id = $1', [teamId]);
   });
 
   it('4. Scale seeder safety guards reject production env, missing flag, and non-_loadtest database names', async () => {
