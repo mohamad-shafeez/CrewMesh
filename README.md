@@ -6,7 +6,6 @@
 
 **Race-proof team formation for hackathons.** When hundreds of people click "join" at the same second, exactly one gets the last seat.
 
-[
 
 ![CI](https://github.com/mohamad-shafeez/CrewMesh/actions/workflows/ci.yml/badge.svg)
 
