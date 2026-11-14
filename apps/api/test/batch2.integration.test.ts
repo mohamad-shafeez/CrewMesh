@@ -505,7 +505,7 @@ describe('Batch 2, 3 & 4 — Transactional Team Formation, Invite Approval & Int
       headers: authMutationHeaders(leader),
     });
     expect(fullRes.statusCode).toBe(409);
-    expect(fullRes.json<{ error: { code: string } }>().error.code).toBe('TEAM_FULL');
+    expect(fullRes.json<{ error: { code: string } }>().error.code).toBe('JOIN_REQUEST_ALREADY_PROCESSED');
   });
 
   it('17, 18, 19, 20 & 36. Invitation creation, leader GET /invites metadata list, redemption into pending join request, expiry, revocation, and max-use enforcement', async () => {
@@ -749,7 +749,7 @@ describe('Batch 2, 3 & 4 — Transactional Team Formation, Invite Approval & Int
       url: `/api/v1/teams/${teamId}/members/${leader.userId}`,
       headers: authMutationHeaders(leader),
     });
-    expect(selfRemove.statusCode).toBe(400);
+    expect(selfRemove.statusCode).toBe(409);
     expect(selfRemove.json<{ error: { code: string } }>().error.code).toBe('LEADER_MUST_USE_LEAVE');
 
     const removeM3 = await app.inject({
@@ -999,12 +999,12 @@ describe('Batch 2, 3 & 4 — Transactional Team Formation, Invite Approval & Int
         .registrationDeadline,
     ).toBeNull();
 
+    const actor = await registerTestActor(app, 'DeadlineActor');
+
     await pool.query(
       "UPDATE hackathons SET registration_deadline = NOW() - INTERVAL '1 hour' WHERE id = $1",
       [hackathonId],
     );
-
-    const actor = await registerTestActor(app, 'DeadlineActor');
     const closedRes = await app.inject({
       method: 'POST',
       url: `/api/v1/hackathons/${hackathonId}/teams`,

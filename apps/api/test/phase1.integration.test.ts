@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { resetEnvCache } from '../src/config/env.js';
 import { runMigrationsUp } from '../src/db/migrate.js';
-import { closeDbPool, getDbPool } from '../src/db/pool.js';
+import { closeDbPool, getDbPool, withTransaction } from '../src/db/pool.js';
 import { seedHackathon } from '../src/db/seed.js';
 import { sha256Hex } from '../src/security/crypto.js';
 
@@ -219,6 +219,7 @@ describe('Phase 1 — Foundation, Database Invariants, and Auth Integration Suit
       },
     });
     const initialToken = extractCookieValue(reg.headers['set-cookie'], 'crewmesh_session')!;
+    const initialCsrf = reg.json<AuthSessionResponse>().csrfToken;
 
     const loginRes = await app.inject({
       method: 'POST',
@@ -226,6 +227,7 @@ describe('Phase 1 — Foundation, Database Invariants, and Auth Integration Suit
       headers: {
         origin: TEST_ORIGIN,
         cookie: `crewmesh_session=${encodeURIComponent(initialToken)}`,
+        'x-csrf-token': initialCsrf,
       },
       payload: {
         email: '  BOB@example.com ',
@@ -465,26 +467,18 @@ describe('Phase 1 — Foundation, Database Invariants, and Auth Integration Suit
       ),
     ).rejects.toThrow();
 
-    // 11b. Creating valid forming team1 and team2
-    const t1Res = await pool.query<{ id: string }>(
-      `INSERT INTO teams (hackathon_id, name, leader_user_id, status, member_count, min_team_size, max_team_size)
-       VALUES ($1, 'Team Alpha', $2, 'forming', 1, 2, 5)
-       RETURNING id`,
-      [hackathonId, u1Id],
-    );
-    const t2Res = await pool.query<{ id: string }>(
-      `INSERT INTO teams (hackathon_id, name, leader_user_id, status, member_count, min_team_size, max_team_size)
-       VALUES ($1, 'Team Beta', $2, 'forming', 1, 2, 5)
-       RETURNING id`,
-      [hackathonId, u2Id],
-    );
-    const team1Id = t1Res.rows[0]!.id;
-    const team2Id = t2Res.rows[0]!.id;
-
     await pool.query(
-      `INSERT INTO team_members (team_id, hackathon_id, user_id, role) VALUES ($1, $2, $3, 'leader')`,
-      [team1Id, hackathonId, u1Id],
+      `INSERT INTO hackathon_participants (hackathon_id, user_id, status) VALUES ($1, $2, 'registered'), ($1, $3, 'registered') ON CONFLICT (hackathon_id, user_id) DO NOTHING`,
+      [hackathonId, u1Id, u2Id],
     );
+
+    const { team1Id, team2Id } = await withTransaction(async (client) => {
+      const t1 = await client.query<{ id: string }>(`INSERT INTO teams (hackathon_id, name, leader_user_id, status, member_count, min_team_size, max_team_size) VALUES ($1, 'Team Alpha', $2, 'forming', 1, 2, 5) RETURNING id`, [hackathonId, u1Id]);
+      const t2 = await client.query<{ id: string }>(`INSERT INTO teams (hackathon_id, name, leader_user_id, status, member_count, min_team_size, max_team_size) VALUES ($1, 'Team Beta', $2, 'forming', 1, 2, 5) RETURNING id`, [hackathonId, u2Id]);
+      const id1 = t1.rows[0]!.id, id2 = t2.rows[0]!.id;
+      await client.query(`INSERT INTO team_members (team_id, hackathon_id, user_id, role) VALUES ($1, $3, $4, 'leader'), ($2, $3, $5, 'leader')`, [id1, id2, hackathonId, u1Id, u2Id]);
+      return { team1Id: id1, team2Id: id2 };
+    }, pool);
 
     // 11c. User 1 cannot join Team Beta in the same hackathon (unique hackathon_id, user_id)
     await expect(

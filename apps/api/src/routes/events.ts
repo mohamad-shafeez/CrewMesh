@@ -61,9 +61,6 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
       'X-Content-Type-Options': 'nosniff',
     });
 
-    raw.write('retry: 3000\n');
-    raw.write(`: connected board=${hackathon.id}\n\n`);
-
     const subscriberId = `board_${crypto.randomUUID()}`;
     await dispatcher.registerSubscriber(
       {
@@ -77,6 +74,11 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
       },
       replaySinceId,
     );
+
+    if (!raw.destroyed && !raw.writableEnded) {
+      raw.write('retry: 3000\n');
+      raw.write(`: connected board=${hackathon.id}\n\n`);
+    }
   });
 
   /**
@@ -129,9 +131,6 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
         'X-Content-Type-Options': 'nosniff',
       });
 
-      raw.write('retry: 3000\n');
-      raw.write(`: connected team=${team.id}\n\n`);
-
       const subscriberId = `team_${crypto.randomUUID()}`;
       await dispatcher.registerSubscriber(
         {
@@ -148,6 +147,11 @@ export async function registerEventRoutes(app: FastifyInstance): Promise<void> {
         },
         replaySinceId,
       );
+
+      if (!raw.destroyed && !raw.writableEnded) {
+        raw.write('retry: 3000\n');
+        raw.write(`: connected team=${team.id}\n\n`);
+      }
     },
   );
 }

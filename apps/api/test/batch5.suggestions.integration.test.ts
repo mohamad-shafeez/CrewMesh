@@ -491,6 +491,6 @@ describe('Batch 5 — Explainable Teammate Intelligence & Skill-Timezone Matchin
        )`,
       [hackathonId, teamId],
     );
-    expect(explainRes.rowCount).toBeGreaterThan(0);
+    expect(explainRes.rows.length).toBeGreaterThan(0);
   });
 });
