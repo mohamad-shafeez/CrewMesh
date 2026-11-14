@@ -483,11 +483,7 @@ export class OutboxSseDispatcher {
       const watermarkRes = await this.pool.query<{ max_id: string | null }>(
         'SELECT MAX(id)::text AS max_id FROM outbox_events',
       );
-      const currentMaxId = watermarkRes.rows[0]?.max_id
-        ? BigInt(watermarkRes.rows[0]!.max_id!)
-        : 0n;
-      const watermarkId =
-        currentMaxId > this.lastDispatchedId ? currentMaxId : this.lastDispatchedId;
+      const watermarkId = watermarkRes.rows[0]?.max_id ? BigInt(watermarkRes.rows[0]!.max_id!) : 0n;
       this.lastDispatchedId = watermarkId;
 
       if (replaySinceEventId !== null) {
@@ -658,12 +654,7 @@ export class OutboxSseDispatcher {
       const maxRes = await this.pool.query<{ max_id: string | null }>(
         'SELECT MAX(id)::text AS max_id FROM outbox_events',
       );
-      if (maxRes.rows[0]?.max_id) {
-        const latest = BigInt(maxRes.rows[0].max_id);
-        if (latest > this.lastDispatchedId) {
-          this.lastDispatchedId = latest;
-        }
-      }
+      this.lastDispatchedId = maxRes.rows[0]?.max_id ? BigInt(maxRes.rows[0].max_id) : 0n;
       return;
     }
 

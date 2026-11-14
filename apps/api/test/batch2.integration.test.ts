@@ -505,7 +505,7 @@ describe('Batch 2, 3 & 4 — Transactional Team Formation, Invite Approval & Int
       headers: authMutationHeaders(leader),
     });
     expect(fullRes.statusCode).toBe(409);
-    expect(fullRes.json<{ error: { code: string } }>().error.code).toBe('JOIN_REQUEST_ALREADY_PROCESSED');
+    expect(fullRes.json<{ error: { code: string } }>().error.code).toBe('TEAM_FULL');
   });
 
   it('17, 18, 19, 20 & 36. Invitation creation, leader GET /invites metadata list, redemption into pending join request, expiry, revocation, and max-use enforcement', async () => {
@@ -749,7 +749,7 @@ describe('Batch 2, 3 & 4 — Transactional Team Formation, Invite Approval & Int
       url: `/api/v1/teams/${teamId}/members/${leader.userId}`,
       headers: authMutationHeaders(leader),
     });
-    expect(selfRemove.statusCode).toBe(409);
+    expect(selfRemove.statusCode).toBe(400);
     expect(selfRemove.json<{ error: { code: string } }>().error.code).toBe('LEADER_MUST_USE_LEAVE');
 
     const removeM3 = await app.inject({

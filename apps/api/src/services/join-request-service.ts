@@ -496,21 +496,6 @@ export async function acceptJoinRequestTx(
     [team.hackathon_id, joinReq.user_id, joinReq.id],
   );
 
-  // If the team just reached max_team_size, automatically expire remaining pending requests for this team
-  if (added.memberCount >= team.max_team_size) {
-    await client.query(
-      `
-      UPDATE join_requests
-      SET
-        status = 'expired',
-        updated_at = NOW()
-      WHERE team_id = $1
-        AND status = 'pending'
-      `,
-      [team.id],
-    );
-  }
-
   // Step 11: Write audit and outbox records within the same transaction
   await insertAuditLog(client, {
     hackathonId: team.hackathon_id,

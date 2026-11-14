@@ -254,7 +254,7 @@ export function TeamDetailPage({
       setDraftSkills(res.team.desiredSkills);
       setActionFeedback({
         type: 'success',
-        message: 'Team desired skill preferences updated in PostgreSQL.',
+        message: 'Team desired skills updated.',
       });
       await loadSuggestionsForLeader(res.team);
     } catch (err) {
@@ -742,7 +742,7 @@ export function TeamDetailPage({
             <section
               className="card"
               aria-labelledby="suggested-teammates-heading"
-              data-testid="suggested-teammates-section"
+              data-testid="suggested-teammates-panel"
             >
               <div className="section-header-row" style={{ marginBottom: '0.35rem' }}>
                 <div>
@@ -886,7 +886,7 @@ export function TeamDetailPage({
                         <article
                           key={cand.userId}
                           className="member-row"
-                          data-testid={`suggestion-card-${cand.userId}`}
+                          data-testid="suggested-teammate-card"
                           style={{ flexDirection: 'column', alignItems: 'stretch' }}
                         >
                           <div
@@ -1153,7 +1153,7 @@ export function TeamDetailPage({
               <section
                 className="card"
                 aria-labelledby="team-preferences-heading"
-                data-testid="team-preferences-section"
+                data-testid="team-preferences-card"
               >
                 <h2 id="team-preferences-heading" style={{ fontSize: '1.15rem', marginTop: 0 }}>
                   Team Skill Preferences
@@ -1211,7 +1211,7 @@ export function TeamDetailPage({
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
                       <input
                         ref={skillInputRef}
-                        id="add-desired-skill-input"
+                        id="add-desired-skill-input" aria-label="Desired Teammate Skills (comma-separated, max 25)"
                         type="text"
                         maxLength={120}
                         placeholder="Add skill tag (e.g. docker, python)..."

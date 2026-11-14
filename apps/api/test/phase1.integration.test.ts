@@ -503,8 +503,8 @@ describe('Phase 1 — Foundation, Database Invariants, and Auth Integration Suit
     // 11e. Audit log record preserves team_id after the team is deleted
     await pool.query(
       `INSERT INTO audit_log (hackathon_id, team_id, actor_user_id, action, entity_type, entity_id, metadata)
-       VALUES ($1, $2, $3, 'TEAM_CREATED', 'team', $2::text, '{"name":"Team Alpha"}'::jsonb)`,
-      [hackathonId, team1Id, u1Id],
+       VALUES ($1, $2, $3, 'TEAM_CREATED', 'team', $4, '{"name":"Team Alpha"}'::jsonb)`,
+      [hackathonId, team1Id, u1Id, String(team1Id)],
     );
 
     await pool.query('DELETE FROM teams WHERE id = $1', [team1Id]);

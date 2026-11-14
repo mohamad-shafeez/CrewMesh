@@ -943,7 +943,7 @@ export async function removeMemberTx(
 
   if (params.targetUserId === params.actorUserId) {
     throw new AppError(
-      409,
+      400,
       'LEADER_MUST_USE_LEAVE',
       'Team leader cannot remove themselves via member removal; use the leave team endpoint instead',
     );
